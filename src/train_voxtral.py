@@ -1,17 +1,21 @@
 import os
 from functools import reduce
 from typing import Dict, Any
+import re
+import pandas as pd
 
 import lhotse
 from safetensors.torch import load_file
 from transformers import EarlyStoppingCallback
 from transformers.utils import logging
 
-from data.collators import DataCollator
-from data.local_datasets import build_datasets, TS_ASR_Dataset, load_cutsets, LhotseLongFormDataset
-from models.containers import WhisperContainer, get_optimizer
+from voxtral.collator import DataCollator
+from data.local_datasets import build_datasets, load_cutsets
+from voxtral.dataset import TS_ASR_Dataset_1 as TS_ASR_Dataset, LhotseLongFormDataset_1 as LhotseLongFormDataset
+from models.containers import get_optimizer
+from voxtral.container import VoxtralContainer
+from utils.evaluation import get_metrics
 from txt_norm import get_text_norm
-from utils.evaluation import compute_longform_metrics
 from utils.general import create_lower_uppercase_mapping, patch_wandb_init_with_config, update_generation_config
 from utils.trainers import CustomTrainer, GradLogger
 from utils.training_args import Cfg
@@ -19,6 +23,32 @@ from utils.training_args import Cfg
 logging.set_verbosity_debug()
 logger = logging.get_logger("transformers")
 
+
+
+def compute_metrics(output_dir: os.path, text_norm, tokenizer, pred,
+                    wandb_pred_to_save: int = 500, decode_with_timestamps=False) -> Dict[
+    str, float]:
+    preds = pred.predictions
+    labels = pred.label_ids
+
+    audio_prefix_end = (labels != -100).argmax()
+
+    preds[preds == -100] = tokenizer.pad_token_id
+    preds[: , :audio_prefix_end] = tokenizer.pad_token_id
+    labels[labels == -100] = tokenizer.pad_token_id
+    pred_str = [text_norm(re.sub(r"\<\|\d+\.\d+\|\>", " ", pred)) for pred in
+                tokenizer.batch_decode(preds, skip_special_tokens=True)]
+    label_str = [text_norm(re.sub(r"\<\|\d+\.\d+\|\>", " ", label).strip()) for label in
+                 tokenizer.batch_decode(labels, skip_special_tokens=True)]
+
+    path = f"{output_dir}/predictions.csv"
+    df = pd.DataFrame({"label": label_str, "prediction": pred_str})
+    df.to_csv(path, index=False)
+
+    # ensure that for jiwer all labels are non empty by replacing empty labels with hyphen
+    label_str = [label if label else "-" for label in label_str]
+
+    return get_metrics(label_str, pred_str)
 
 class ModelTrainer:
     def __init__(self, cfg: Cfg):
@@ -36,7 +66,7 @@ class ModelTrainer:
 
     def _initialize_container(self):
         """Initialize the model container with appropriate configuration."""
-        self.container = WhisperContainer(
+        self.container = VoxtralContainer(
             model_args=self.model_args,
             data_args=self.data_args,
             use_flash_attention=self.training_args.use_flash_attention,
@@ -83,15 +113,15 @@ class ModelTrainer:
         dev_datasets = build_datasets(
             self.data_args.dev_cutsets, self.data_args,
             self.text_norm, self.container, self.data_args.dev_diar_cutsets,
-            enrollment_cutset=enrollment_cutset,
-            dataset_class=LhotseLongFormDataset
+            enrollment_cutset=enrollment_cutset, dataset_class=LhotseLongFormDataset,
+            use_ids_as_transcripts=False
         )
 
         eval_datasets = build_datasets(
             self.data_args.eval_cutsets, self.data_args,
             self.text_norm, self.container, self.data_args.eval_diar_cutsets,
-            enrollment_cutset=enrollment_cutset,
-            dataset_class=LhotseLongFormDataset
+            enrollment_cutset=enrollment_cutset, dataset_class=LhotseLongFormDataset,
+            use_ids_as_transcripts=False
         )
 
         return dev_datasets, eval_datasets
@@ -105,7 +135,7 @@ class ModelTrainer:
 
         if self.model_args.reinit_from:
             state_dict = self._load_state_dict(self.model_args.reinit_from)
-            state_dict['proj_out.weight'] = state_dict['model.decoder.embed_tokens.weight']
+            # state_dict['proj_out.weight'] = state_dict['model.decoder.embed_tokens.weight']
             logger.info(f'Loading model weights from: {self.model_args.reinit_from}')
             logger.info(self.model.load_state_dict(state_dict, strict=False))
 
@@ -130,33 +160,21 @@ class ModelTrainer:
         """Create appropriate data collator."""
 
         return DataCollator(
-            feature_extractor=self.container.feature_extractor,
-            tokenizer=self.container.tokenizer,
-            bos_token_id=self.container.model.config.decoder_start_token_id,
+            processor=self.container.processor,
             max_length=self.training_args.generation_max_length,
-            stno_gaussian_noise_var=self.aug_args.stno_gaussian_noise_var,
-            stno_gaussian_noise_prob=self.aug_args.stno_gaussian_noise_prob,
-            stno_segment_augment_prob=self.aug_args.stno_segment_augment_prob,
-            stno_segment_change_prob=self.aug_args.stno_segment_change_prob,
-            stno_min_segment_length=self.aug_args.stno_min_segment_length,
-            stno_max_segment_length=self.aug_args.stno_max_segment_length,
-            spec_aug_prob=self.aug_args.spec_aug_prob,
-            use_enrollments=self.data_args.use_enrollments,
         )
-
-    def _create_compute_metrics_fn(self, dev_datasets):
+    def _create_compute_metrics_fn(self):
         """Create metrics computation function."""
 
-        def _compute_metrics(pred, dset=None, split='dev', metrics_list=None):
+        def _compute_metrics(pred, split='dev'):
             step = self.trainer.state.global_step
             output_dir = f'{self.trainer.args.output_dir}/{split}/{step}'
             os.makedirs(output_dir, exist_ok=True)
-            return compute_longform_metrics(
-                pred, self.trainer, output_dir, self.text_norm,
-                self.training_args.train_metrics_list if metrics_list is None else metrics_list,
-                dset,
-                save_visualizations=self.training_args.save_visualizations,
-            )
+            return compute_metrics(pred=pred,
+                                   output_dir=output_dir,
+                                   text_norm=self.text_norm,
+                                   tokenizer=self.container.tokenizer,
+                                   )
 
         return _compute_metrics
 
@@ -176,15 +194,10 @@ class ModelTrainer:
 
     def do_eval(self, eval_datasets, decoding_ctc_weight, eval_metrics_list, condition_key):
         """Perform evaluation on given datasets."""
-        _compute_metrics = self._create_compute_metrics_fn(eval_datasets)
+        _compute_metrics = self._create_compute_metrics_fn()
 
         # Update compute_metrics for trainer
-        self.trainer.compute_metrics = (
-            lambda x: _compute_metrics(
-                x, eval_datasets[self.trainer.metric_key_prefix.removeprefix(f"{condition_key}_")],
-                split=self.trainer.metric_key_prefix, metrics_list=eval_metrics_list
-            )
-        )
+        self.trainer.compute_metrics = lambda x: _compute_metrics(x, split=self.trainer.metric_key_prefix)
 
         # Perform evaluation
         self.trainer.args.predict_with_generate = True
@@ -213,8 +226,7 @@ class ModelTrainer:
         create_lower_uppercase_mapping(self.container.tokenizer)
         self._log_model_parameters()
         self._load_model_weights()
-        update_generation_config(self.model, self.training_args, self.decoding_args,
-                                 predict_timestamps=self.data_args.use_timestamps)
+        update_generation_config(self.model, self.training_args, self.decoding_args, predict_timestamps=self.data_args.use_timestamps)
 
         # Create trainer
         collator = self._create_data_collator()
@@ -241,15 +253,10 @@ class ModelTrainer:
         # Setup metrics computation
         if self.training_args.predict_with_generate:
             self.model.generation_config.ctc_weight = self.decoding_args.decoding_ctc_weight
-            _compute_metrics = self._create_compute_metrics_fn(dev_datasets)
+            _compute_metrics = self._create_compute_metrics_fn()
 
-            self.trainer.compute_metrics = (
-                lambda x: _compute_metrics(
-                    x, dev_datasets[self.trainer.metric_key_prefix.removeprefix("eval_")],
-                    split=self.trainer.metric_key_prefix,
-                    metrics_list=self.training_args.train_metrics_list
-                )
-            )
+            # Update compute_metrics for trainer
+            self.trainer.compute_metrics = lambda x: _compute_metrics(x, split=self.trainer.metric_key_prefix)
 
         # Train and evaluate
         if not self.training_args.decode_only:
