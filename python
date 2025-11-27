@@ -1,7 +1,7 @@
 #!/bin/bash
 unset PYTHONPATH
 unset PYTHONHOME
-source /mnt/matylda5/ipoloka/miniconda3/bin/activate /mnt/matylda5/ipoloka/miniconda3/envs/notsofar
+source /mnt/matylda5/ipoloka/miniconda3/bin/activate /mnt/matylda5/ipoloka/miniconda3/envs/tsasr/
 
 PORT=9049
 
@@ -25,14 +25,13 @@ fi
 
 export http_proxy=socks5://localhost:$PORT
 export https_proxy=socks5://localhost:$PORT
-export PATH="/mnt/matylda5/ipoloka/utils/SCTK/bin:$PATH"
-export PYTHONPATH="/mnt/matylda5/ipoloka/chime/notsofar/CHIME2024/inference:$PYTHONPATH"
+export PYTHONPATH="/mnt/matylda5/ipoloka/projects/TS-ASR-Whisper/src:$PYTHONPATH"
 export HF_HOME="/mnt/scratch/tmp/ipoloka/hf_cache"
 
-source /mnt/matylda5/ipoloka/challenges/NOTSOFAR1-Challenge/configs/local_paths.sh
+source /mnt/matylda5/ipoloka/projects/TS-ASR-Whisper/configs/local_paths.sh
 
 # if more than one device is passed, use torchrun to run the script
-if [ "$N_GPUS" -gt 1 ]; then
+if [ -n "$N_GPUS" ] && [ "$N_GPUS" -gt 1 ]; then
   torchrun --standalone --nnodes=1 --nproc-per-node=$N_GPUS "$@"
 else
   python "$@"
