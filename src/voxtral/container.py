@@ -18,9 +18,6 @@ class VoxtralForConditionalGenerationCustom(VoxtralForConditionalGeneration):
     def __init__(self, config):
         super().__init__(config)
         dicow_config = DiCoWConfig.from_pretrained("/mnt/matylda5/ipoloka/projects/TS-ASR-Whisper/dicow_large_v3")
-        # dicow_config.fddt_init = "non-disturbing"
-        # dicow_config.use_fddt = False
-        # dicow_config.torch_dtype = config.torch_dtype
         dicow_config.ctc_weight=0.0
         dicow_config.additional_self_attention_layer = False
         dicow_config.pre_ctc_sub_sample = False
@@ -124,11 +121,9 @@ class VoxtralForConditionalGenerationCustom(VoxtralForConditionalGeneration):
 
 def get_dixtral(repo_id, device):
     dicow = DiCoWForConditionalGeneration.from_pretrained(
-        "/mnt/matylda5/ipoloka/projects/TS-ASR-Whisper/dicow_large_v3", device_map=device,
-        attn_implementation="flash_attention_2" if torch.cuda.is_available() and supports_flash_attention() else None)
+        "/mnt/matylda5/ipoloka/projects/TS-ASR-Whisper/dicow_large_v3", device_map=device)
     model = VoxtralForConditionalGenerationCustom.from_pretrained(repo_id,
-                                                                  device_map=device,
-                                                                  attn_implementation="flash_attention_2" if torch.cuda.is_available() and supports_flash_attention() else None)
+                                                                  device_map=device)
     model.audio_tower.load_state_dict(dicow.get_encoder().state_dict(), strict=False)
     del dicow
     return model
@@ -138,22 +133,12 @@ class VoxtralContainer:
     def __init__(self, use_flash_attention=False, params_to_keep_frozen_keywords=None, remove_timestamps_from_ctc=False,
                  model_args=None, data_args=None, use_fddt=False, use_lora=False, repo_id="mistralai/Voxtral-Mini-3B-2507"):
         self.model_type = model_args.whisper_model
-        # predict_timestamps = data_args.use_timestamps
-        # global_lang_id = data_args.global_lang_id
+
         self.model = get_dixtral(repo_id, device='cuda')
         self.processor = AutoProcessor.from_pretrained(repo_id)
 
         self.feature_extractor = self.processor.feature_extractor
         self.tokenizer = self.processor.tokenizer
-
-        # if ".en" not in self.model_type:
-        #     self.model.generation_config.language = None
-        #     self.model.generation_config.task = "transcribe"
-        #     # This ensures labels
-        #     self.tokenizer.set_prefix_tokens(predict_timestamps=predict_timestamps, task="transcribe",
-        #                                      language=global_lang_id)
-        # else:
-        #     self.tokenizer.set_prefix_tokens(predict_timestamps=predict_timestamps)
 
         self.model.set_tokenizer(self.processor.tokenizer)
         self.model.config.forced_decoder_ids = None
