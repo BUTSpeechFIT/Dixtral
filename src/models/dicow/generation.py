@@ -122,7 +122,7 @@ class DiCoWGenerationMixin(WhisperForConditionalGeneration):
         task = getattr(generation_config, "task", None)
         language = getattr(generation_config, "language", None)
 
-        forced_decoder_ids = generation_config.forced_decoder_ids
+        forced_decoder_ids = generation_config.forced_decoder_ids if hasattr(generation_config, "forced_decoder_ids") else None
         if forced_decoder_ids is not None:
             if language is None and task is None and forced_decoder_ids[0][1] is None:
                 logger.warning_once(

@@ -176,7 +176,7 @@ class DiCoWEncoder(WhisperEncoder):
 
         all_positions = torch.arange(self.embed_positions.num_embeddings, device=inputs_embeds.device)
 
-        hidden_states = inputs_embeds + self.embed_positions(all_positions).to(dtype=inputs_embeds.dtype)
+        hidden_states = inputs_embeds + self.embed_positions(all_positions)
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
 
         encoder_states = () if output_hidden_states else None

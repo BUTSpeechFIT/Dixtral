@@ -15,7 +15,7 @@ from transformers.utils import logging
 from .config import DiCoWConfig
 from .encoder import DiCoWEncoder
 from .generation import DiCoWGenerationMixin
-import wandb
+
 logging.set_verbosity_debug()
 logger = logging.get_logger("transformers")
 
@@ -204,8 +204,6 @@ class DiCoWForConditionalGeneration(DiCoWGenerationMixin, WhisperForConditionalG
                 enc_labels[enc_labels == self.config.eos_token_id] = -100
 
                 ctc_loss = self.get_encoder().get_loss(enc_lm_logits, enc_labels)
-                if wandb.run is not None:
-                    wandb.log({"ctc_loss": ctc_loss, "dec_loss": dec_loss})
                 loss = (1 - self.config.ctc_weight) * dec_loss + self.config.ctc_weight * ctc_loss
             else:
                 loss = dec_loss
