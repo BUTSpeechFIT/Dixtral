@@ -3,21 +3,67 @@ from functools import reduce
 from typing import Dict, Any
 
 import lhotse
+import torch
+from peft.utils.save_and_load import _insert_adapter_name_into_state_dict
 from safetensors.torch import load_file
-from transformers import EarlyStoppingCallback
+from transformers import EarlyStoppingCallback, TrainerCallback, TrainingArguments, TrainerState, TrainerControl
 from transformers.utils import logging
 
-from data.collators import DataCollator
-from data.local_datasets import build_datasets, TS_ASR_Dataset, load_cutsets, LhotseLongFormDataset
-from models.containers import WhisperContainer, get_optimizer
+from data.collators import DataCollator, DataCollatorQA
+from models.container import DixtralContainer
+from data.local_datasets import TS_ASR_Dataset, LhotseLongFormDataset, TS_QA_Dataset
 from txt_norm import get_text_norm
-from utils.evaluation import compute_longform_metrics
-from utils.general import create_lower_uppercase_mapping, patch_wandb_init_with_config, update_generation_config
+from utils.evaluation import compute_longform_metrics, compute_qa_metrics
+from utils.general import patch_wandb_init_with_config, update_generation_config
 from utils.trainers import CustomTrainer, GradLogger
 from utils.training_args import Cfg
 
 logging.set_verbosity_debug()
 logger = logging.get_logger("transformers")
+
+
+class SaveNonPeftParamsCallback(TrainerCallback):
+    """Save only non-PEFT (base model / custom) parameters, ignoring PEFT adapter weights."""
+
+    def on_save(
+            self,
+            args: TrainingArguments,
+            state: TrainerState,
+            control: TrainerControl,
+            **kwargs,
+    ):
+        checkpoint_folder = os.path.join(
+            args.output_dir,
+            f"checkpoint-{state.global_step}",
+        )
+        os.makedirs(checkpoint_folder, exist_ok=True)
+
+        model = kwargs["model"]
+
+        # Unwrap from DeepSpeed / FSDP / DDP if needed
+        if hasattr(model, "module"):
+            model = model.module
+
+        # Get all PEFT parameter names to exclude
+        peft_param_names = set(model.peft_model.state_dict().keys()) if hasattr(model, "peft_model") \
+            else {name for name, _ in model.named_parameters() if "lora_" in name or "adapter_" in name}
+
+        # Strip the "base_model.model." prefix that LoRA adds, to match the
+        # key format expected by _load_model_weights when use_lora=True
+        # (it re-adds that prefix itself before calling load_state_dict)
+        lora_prefix = "base_model.model."
+        non_peft_state_dict = {}
+        for name, param in model.named_parameters():
+            if name not in peft_param_names and param.requires_grad:
+                # Strip LoRA wrapper prefix so keys match the raw model keys
+                save_key = name.removeprefix(lora_prefix)
+                non_peft_state_dict[save_key] = param.detach().cpu().to(torch.float32)
+
+        # Save as .safetensors to match the reload logic in _load_model_weights
+        from safetensors.torch import save_file
+        save_file(non_peft_state_dict, os.path.join(checkpoint_folder, "non_peft_params.safetensors"))
+
+        return control
 
 
 class ModelTrainer:
@@ -32,18 +78,16 @@ class ModelTrainer:
         self.container = None
         self.model = None
         self.trainer = None
-        self.text_norm = None
+        self.dev_text_norm = None
+        self.eval_text_norm = None
 
     def _initialize_container(self):
         """Initialize the model container with appropriate configuration."""
-        self.container = WhisperContainer(
+        self.container = DixtralContainer(
             model_args=self.model_args,
-            data_args=self.data_args,
-            use_flash_attention=self.training_args.use_flash_attention,
-            remove_timestamps_from_ctc=self.training_args.remove_timestamps_from_ctc,
-            use_fddt=self.training_args.use_fddt,
+            n_last_dec_layers_to_unfreeze=self.training_args.n_last_dec_layers_to_unfreeze,
             use_lora=self.training_args.use_lora,
-            params_to_keep_frozen_keywords=self.model_args.params_to_keep_frozen_keywords,
+            params_to_keep_frozen_keywords=self.training_args.params_to_keep_frozen_keywords,
         )
 
     def _load_training_cutsets(self):
@@ -61,7 +105,8 @@ class ModelTrainer:
 
     def _create_train_dataset(self, train_cutsets, enrollment_cutset):
         """Create training dataset."""
-        train_dataset = TS_ASR_Dataset(
+        dataset_class = TS_QA_Dataset if self.training_args.train_for_qa else TS_ASR_Dataset
+        train_dataset = dataset_class(
             train_cutsets,
             do_augment=self.aug_args.do_augment,
             dataset_weights=self.data_args.dataset_weights,
@@ -80,34 +125,74 @@ class ModelTrainer:
 
     def _create_eval_datasets(self, enrollment_cutset):
         """Create development and evaluation datasets."""
+        if self.training_args.train_for_qa:
+            dev = {"qa_dev": TS_QA_Dataset(
+                load_cutsets(self.data_args.dev_cutsets, False),
+                text_norm=get_text_norm(self.data_args.dev_text_norm),
+                feature_extractor=self.container.feature_extractor,
+                global_lang_id=self.data_args.global_lang_id,
+            )}
+
+            eval = {"qa_eval": TS_QA_Dataset(
+                load_cutsets(self.data_args.eval_cutsets, False),
+                text_norm=get_text_norm(self.data_args.eval_text_norm),
+                feature_extractor=self.container.feature_extractor,
+                global_lang_id=self.data_args.global_lang_id,
+            )}
+            return dev, eval
+
         dev_datasets = build_datasets(
             self.data_args.dev_cutsets, self.data_args,
-            self.text_norm, self.container, self.data_args.dev_diar_cutsets,
-            enrollment_cutset=enrollment_cutset,
-            dataset_class=LhotseLongFormDataset
+            self.dev_text_norm, self.container, self.data_args.dev_diar_cutsets,
+            enrollment_cutset=enrollment_cutset, dataset_class=LhotseLongFormDataset,
+            use_ids_as_transcripts=self.data_args.use_diar
         )
 
         eval_datasets = build_datasets(
             self.data_args.eval_cutsets, self.data_args,
-            self.text_norm, self.container, self.data_args.eval_diar_cutsets,
-            enrollment_cutset=enrollment_cutset,
-            dataset_class=LhotseLongFormDataset
+            self.eval_text_norm, self.container, self.data_args.eval_diar_cutsets,
+            enrollment_cutset=enrollment_cutset, dataset_class=LhotseLongFormDataset,
+            use_ids_as_transcripts=self.data_args.use_diar
         )
 
         return dev_datasets, eval_datasets
 
     def _load_model_weights(self):
         """Load pretrained model weights if specified."""
+        if self.model_args.skip_reinit:
+            return
         if self.model_args.reinit_encoder_from:
             enc_state_dict = load_file(self.model_args.reinit_encoder_from)
             enc_state_dict_no_fddt = {k: v for k, v in enc_state_dict.items() if 'fddt' not in k}
             logger.info(self.model.get_encoder().load_state_dict(enc_state_dict_no_fddt, strict=False))
 
         if self.model_args.reinit_from:
-            state_dict = self._load_state_dict(self.model_args.reinit_from)
-            state_dict['proj_out.weight'] = state_dict['model.decoder.embed_tokens.weight']
             logger.info(f'Loading model weights from: {self.model_args.reinit_from}')
-            logger.info(self.model.load_state_dict(state_dict, strict=False))
+            path = self.model_args.reinit_from
+            if path.endswith('.safetensors'):
+                state_dict = load_file(path)
+                logger.info(self.model.load_state_dict(state_dict, strict=False))
+            else:
+                # Load all safetensors files in directory and merge
+                state_dict = {}
+                for file in os.listdir(path):
+                    if file.endswith('.safetensors') and "adapter" not in file:
+                        state_dict.update(load_file(os.path.join(path, file)))
+                if self.training_args.use_lora:
+                    prefix = "base_model.model."
+                    state_dict = {prefix + k: v for k, v in state_dict.items()}
+
+                if self.training_args.use_lora:
+                    adapter_state_dict = load_file(f"{path}/adapter_model.safetensors")
+                    adapter_state_dict = _insert_adapter_name_into_state_dict(adapter_state_dict, "default", "lora_")
+                    state_dict = state_dict | adapter_state_dict
+                logger.info(self.model.load_state_dict(state_dict, strict=False))
+        if self.training_args.soft_prompt_custom_init:
+            if hasattr(self.model, "soft_prompt"):
+                with torch.no_grad():
+                    init_embedding = self.model.language_model.base_model.embed_tokens.weight[34]  # transcribe token
+                    self.model.soft_prompt.data.copy_(
+                        init_embedding.unsqueeze(0).unsqueeze(0).expand(self.model.soft_prompt.shape).clone())
 
     def _load_state_dict(self, path: str) -> Dict[str, Any]:
         """Load state dictionary from file or directory."""
@@ -128,20 +213,13 @@ class ModelTrainer:
 
     def _create_data_collator(self):
         """Create appropriate data collator."""
-
-        return DataCollator(
-            feature_extractor=self.container.feature_extractor,
-            tokenizer=self.container.tokenizer,
-            bos_token_id=self.container.model.config.decoder_start_token_id,
+        collator_class = DataCollatorQA if self.training_args.train_for_qa else DataCollator
+        return collator_class(
+            processor=self.container.processor,
             max_length=self.training_args.generation_max_length,
-            stno_gaussian_noise_var=self.aug_args.stno_gaussian_noise_var,
-            stno_gaussian_noise_prob=self.aug_args.stno_gaussian_noise_prob,
-            stno_segment_augment_prob=self.aug_args.stno_segment_augment_prob,
-            stno_segment_change_prob=self.aug_args.stno_segment_change_prob,
-            stno_min_segment_length=self.aug_args.stno_min_segment_length,
-            stno_max_segment_length=self.aug_args.stno_max_segment_length,
-            spec_aug_prob=self.aug_args.spec_aug_prob,
-            use_enrollments=self.data_args.use_enrollments,
+            model_id=self.model_args.dixtral_base_model,
+            prep_for_generate=self.training_args.predict_with_generate,
+            num_soft_prompts=self.model_args.num_soft_prompts,
         )
 
     def _create_compute_metrics_fn(self, dev_datasets):
@@ -152,7 +230,7 @@ class ModelTrainer:
             output_dir = f'{self.trainer.args.output_dir}/{split}/{step}'
             os.makedirs(output_dir, exist_ok=True)
             return compute_longform_metrics(
-                pred, self.trainer, output_dir, self.text_norm,
+                pred, self.trainer, output_dir, self.eval_text_norm,
                 self.training_args.train_metrics_list if metrics_list is None else metrics_list,
                 dset,
                 save_visualizations=self.training_args.save_visualizations,
@@ -172,24 +250,32 @@ class ModelTrainer:
         """Setup FDDT-only training if specified."""
         if (self.training_args.use_fddt_only_n_epochs > 0 or
                 self.training_args.use_fddt_only_n_steps > 0):
-            self.container.freeze_except(self.model_args.prefixes_to_preheat)
+            self.container.update_model_freezing(self.training_args.prefixes_to_preheat)
+        else:
+            self.container.update_model_freezing()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
-    def do_eval(self, eval_datasets, decoding_ctc_weight, eval_metrics_list, condition_key):
+    def do_eval(self, eval_datasets, decoding_ctc_weight, eval_metrics_list, condition_key, save_results=False):
         """Perform evaluation on given datasets."""
-        _compute_metrics = self._create_compute_metrics_fn(eval_datasets)
-
-        # Update compute_metrics for trainer
-        self.trainer.compute_metrics = (
-            lambda x: _compute_metrics(
-                x, eval_datasets[self.trainer.metric_key_prefix.removeprefix(f"{condition_key}_")],
-                split=self.trainer.metric_key_prefix, metrics_list=eval_metrics_list
-            )
-        )
-
-        # Perform evaluation
         self.trainer.args.predict_with_generate = True
+        self.collator.prep_for_generate = True
         if decoding_ctc_weight is not None:
             self.model.generation_config.ctc_weight = decoding_ctc_weight
+
+        if self.training_args.train_for_qa:
+            output_dir = f'{self.trainer.args.output_dir}/{condition_key}'
+            self.trainer.compute_metrics = lambda pred: compute_qa_metrics(
+                pred, self.trainer, output_dir=output_dir, save_results=save_results,
+            )
+        else:
+            _compute_metrics = self._create_compute_metrics_fn(eval_datasets)
+            self.trainer.compute_metrics = (
+                lambda x: _compute_metrics(
+                    x, eval_datasets[self.trainer.metric_key_prefix.removeprefix(f"{condition_key}_")],
+                    split=self.trainer.metric_key_prefix, metrics_list=eval_metrics_list
+                )
+            )
 
         metrics = self.trainer.evaluate(eval_dataset=eval_datasets, metric_key_prefix=condition_key)
         logger.info(f"Metrics {metrics}")
@@ -200,7 +286,8 @@ class ModelTrainer:
 
         # Initialize components
         self._initialize_container()
-        self.text_norm = get_text_norm(self.data_args.eval_text_norm)
+        self.dev_text_norm = get_text_norm(self.data_args.dev_text_norm)
+        self.eval_text_norm = get_text_norm(self.data_args.eval_text_norm)
 
         # Load data
         train_cutsets = self._load_training_cutsets()
@@ -210,33 +297,36 @@ class ModelTrainer:
 
         # Setup model
         self.model = self.container.model
-        create_lower_uppercase_mapping(self.container.tokenizer)
         self._log_model_parameters()
         self._load_model_weights()
+        self._setup_fddt_training()
         update_generation_config(self.model, self.training_args, self.decoding_args,
                                  predict_timestamps=self.data_args.use_timestamps)
 
         # Create trainer
-        collator = self._create_data_collator()
-        callbacks = ([EarlyStoppingCallback(self.training_args.early_stopping_patience)]
-                     if self.training_args.early_stopping_patience > 0 else None)
-
+        self.collator = self._create_data_collator()
+        callbacks = [EarlyStoppingCallback(
+            self.training_args.early_stopping_patience)] if self.training_args.early_stopping_patience > 0 else []
+        if self.training_args.use_lora:
+            callbacks.append(SaveNonPeftParamsCallback())
+        self.model.is_parallelizable = True
+        self.model.model_parallel = True
         self.trainer = CustomTrainer(
             model=self.model,
             args=self.training_args,
             eval_dataset=dev_datasets,
-            data_collator=collator,
+            data_collator=self.collator,
             train_dataset=train_dataset,
             processing_class=self.container.tokenizer,
             container=self.container,
-            optimizers=(get_optimizer(self.model, self.training_args, self.model_args.prefixes_to_preheat), None),
             callbacks=callbacks,
-            params_to_keep_frozen=self.model_args.params_to_keep_frozen_keywords,
         )
 
         # Setup additional components
         self._setup_wandb()
-        self._setup_fddt_training()
+
+        for p in self.model.parameters():
+            p.data = p.data.to(torch.bfloat16)
 
         # Setup metrics computation
         if self.training_args.predict_with_generate:
@@ -256,7 +346,8 @@ class ModelTrainer:
             self.trainer.train(resume_from_checkpoint=self.training_args.resume_from_checkpoint)
 
         self.do_eval(eval_datasets, self.decoding_args.decoding_ctc_weight,
-                     self.training_args.eval_metrics_list, "test")
+                     self.training_args.eval_metrics_list, "test",
+                     save_results=self.training_args.save_eval_results)
 
 
 def main(cfg: Cfg) -> None:

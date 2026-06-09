@@ -1,78 +1,56 @@
 from collections import defaultdict
+import string
 
 
-def count_ngrams(text, min_n=2, max_n=5):
-    words = text.split()
-    counts = defaultdict(int)
-    for n in range(min_n, max_n + 1):
-        for i in range(len(words) - n + 1):
-            ngram_words = words[i:i + n]
-            # Skip n-grams where all words are identical (case-insensitive)
-            if all(word.lower() == ngram_words[0].lower() for word in ngram_words):
-                continue
-            ngram = ' '.join(ngram_words)
-            counts[ngram] += 1
-    return counts
-
-
-def truncate_at_repeating_ngram(text, ngram_length=10, min_n=1, max_n=None, min_word_threshold=30,
-                                unigram_min_repeat=10, repeat_threshold=10):
+def truncate_at_repeating_ngram(text, ngram_length=10, min_n=1, max_n=None,
+                                min_word_threshold=30, unigram_min_repeat=10,
+                                repeat_threshold=10):
     """
-    Truncate text at the first occurrence of a repeating n-gram that occurs more than repeat_threshold times.
-
-    Args:
-        text: Input text to process
-        ngram_length: Target n-gram length to check for (default: 10 words)
-        min_n: Minimum n-gram size to check (default: 1)
-        max_n: Maximum n-gram size to check (default: ngram_length)
-        min_word_threshold: Minimum number of words required to process (default: 30)
-        unigram_min_repeat: Minimum consecutive repeats for unigrams (default: 3)
-        repeat_threshold: Minimum total occurrences of n-gram to consider it repeating (default: 2)
-
-    Returns:
-        Truncated text up to the first repeating n-gram above threshold, or original text if not found
+    Truncates text if repeating loops are found at the end,
+    ignoring case and punctuation during comparison.
     """
-    if max_n is None:
-        max_n = ngram_length
-
     words = text.split()
+
     if len(words) < min_word_threshold:
         return text
 
-    earliest_truncation_idx = len(words)  # Default: no truncation
+    if max_n is None:
+        max_n = min(ngram_length, 6)
 
-    # Handle unigrams with consecutive repetition
-    if min_n == 1:
-        for i in range(len(words) - unigram_min_repeat + 1):
-            current_word = words[i].lower()
-            consecutive_count = 1
-            for j in range(i + 1, len(words)):
-                if words[j].lower() == current_word:
-                    consecutive_count += 1
-                else:
-                    break
-            if consecutive_count >= unigram_min_repeat:
-                earliest_truncation_idx = min(earliest_truncation_idx, i + 1)
-                break  # Prioritize consecutive unigrams
+    # Helper to clean words for comparison: lowercase and strip punctuation
+    # We create a translation table once for efficiency
+    table = str.maketrans('', '', string.punctuation)
 
-    # Count all n-grams first
-    all_ngram_counts = count_ngrams(text, min_n=max(2, min_n), max_n=max_n)
+    def clean(word_list):
+        return [w.lower().translate(table) for w in word_list]
 
-    # Find earliest occurrence of any repeated n-gram (above threshold)
-    lengths_to_check = [ngram_length] + [n for n in range(min_n, max_n + 1)
-                                         if n != ngram_length and n > 1]
+    for n in range(min_n, max_n + 1):
+        pattern_raw = words[-n:]
+        if not pattern_raw: continue
 
-    for n in lengths_to_check:
-        for i in range(len(words) - n + 1):
-            ngram = ' '.join(words[i:i + n])
-            if all_ngram_counts[ngram] > repeat_threshold:
-                earliest_truncation_idx = min(earliest_truncation_idx, i + n)
+        # Clean the pattern we are looking for
+        pattern_clean = clean(pattern_raw)
 
-    # Return truncated text if needed
-    if earliest_truncation_idx < len(words):
-        return ' '.join(words[:earliest_truncation_idx])
+        count = 0
+        idx = len(words)
+
+        while idx >= n:
+            chunk_raw = words[idx - n: idx]
+
+            # Compare cleaned versions
+            if clean(chunk_raw) == pattern_clean:
+                count += 1
+                idx -= n
+            else:
+                break
+
+        limit = unigram_min_repeat if n == 1 else repeat_threshold
+
+        if count >= limit:
+            # Truncate and return the original text up to the loop start
+            return " ".join(words[:idx]) + " _HALUCINATION_"
+
     return text
-
 
 
 def find_first_repeating_ngram(text, target_length=10, min_n=1, max_n=None, min_word_threshold=20, unigram_min_repeat=5,

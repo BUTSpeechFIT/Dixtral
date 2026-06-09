@@ -1,4 +1,4 @@
-from typing import Any, Union, Dict, List, Optional, Tuple, Callable
+from typing import Any, Union, Dict, List, Optional, Tuple
 
 import torch
 import wandb
@@ -6,10 +6,13 @@ from torch import nn
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
 from transformers import Seq2SeqTrainer, Trainer, TrainingArguments, TrainerCallback, TrainerState, TrainerControl
-from transformers.trainer_pt_utils import get_model_param_count
 from transformers.trainer_utils import EvalLoopOutput
-from transformers.utils import logging, is_datasets_available
+from transformers.utils import logging, is_sagemaker_mp_enabled
+
 from utils.compute_overall_statisctics import main as compute_overall_stats
+
+if is_sagemaker_mp_enabled():
+    import smdistributed.modelparallel.torch as smp
 
 logging.set_verbosity_debug()
 logger = logging.get_logger("transformers")
@@ -22,7 +25,7 @@ class GradLogger(TrainerCallback):
 
     def on_epoch_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         if wandb.run is not None:
-            wandb.watch(self.model, log='all', log_freq=5)
+            wandb.watch(self.model, log='all', log_freq=50)
         else:
             raise ValueError("wandb is not initialized")
 
@@ -103,13 +106,12 @@ class CustomTrainerEncoder(Trainer):
 
 
 class CustomTrainer(Seq2SeqTrainer):
-    def __init__(self, container, model, params_to_keep_frozen, **kwargs):
+    def __init__(self, container, model, **kwargs):
         super().__init__(model=model, **kwargs)
         self.forward_w_cast = None
         self.forward_wo_cast = None
         self.container = container
         self.warmup_phase = True
-        self.params_to_keep_frozen = params_to_keep_frozen
         self.metric_key_prefix = ""
 
     def training_step(
@@ -119,21 +121,15 @@ class CustomTrainer(Seq2SeqTrainer):
         num_items_in_batch: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.warmup_phase and self.state.epoch >= self.args.use_fddt_only_n_epochs and self.state.global_step >= self.args.use_fddt_only_n_steps:
-            for name, param in self.model.named_parameters():
-                if "lora_" in name:
-                    param.requires_grad = True
-                    continue
-                for keyword in self.params_to_keep_frozen:
-                    if keyword in name:
-                        param.requires_grad = False
-                        break
-                else:
-                    param.requires_grad = True
-            logger.info(f"***** Unfreezing params except {self.params_to_keep_frozen}*****")
-            logger.info(f"  Number of trainable parameters = {get_model_param_count(model, trainable_only=True):,}")
+            logger.info(f"***** Ending Warmup: Unfreezing remaining params*****")
+            self.container.update_model_freezing()
+
+            self.lr_scheduler = None
             self.create_optimizer_and_scheduler(num_training_steps=self.state.max_steps)
 
             self.warmup_phase = False
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
         output = super().training_step(model, inputs, num_items_in_batch)
         return output
 
@@ -174,9 +170,36 @@ class CustomTrainer(Seq2SeqTrainer):
             ignore_keys: Optional[List[str]] = None,
             metric_key_prefix: str = "eval",
     ) -> EvalLoopOutput:
+        self._move_optimizer_to_device("cpu")
+        torch.cuda.empty_cache()
         self.metric_key_prefix = metric_key_prefix
         output = super().evaluation_loop(dataloader, description, prediction_loss_only, ignore_keys, metric_key_prefix)
+        self._move_optimizer_to_device(self.model.device)
         return output
+
+    def _move_optimizer_to_device(self, device):
+        """
+        Helper to move optimizer state to a target device.
+        """
+        if self.optimizer is None:
+            return
+
+        # Iterate through all parameters in the optimizer
+        for param_group in self.optimizer.param_groups:
+            for param in param_group['params']:
+                if param.is_cuda:  # Only touch CUDA params
+                    state = self.optimizer.state[param]
+                    for key, value in state.items():
+                        # Move tensors (like exp_avg, exp_avg_sq) to target device
+                        if torch.is_tensor(value):
+                            state[key] = value.to(device)
+
+        # Explicitly empty cache to reclaim the memory immediately
+        if str(device) == "cpu":
+            torch.cuda.empty_cache()
+            logger.info("Optimizer offloaded to CPU. CUDA Cache Cleared.")
+        else:
+            logger.info("Optimizer reloaded to GPU.")
 
     def prediction_step(
         self,
@@ -187,15 +210,28 @@ class CustomTrainer(Seq2SeqTrainer):
         **gen_kwargs,
     ) -> tuple[Optional[float], Optional[torch.Tensor], Optional[torch.Tensor]]:
         # We want to disable loss computation as it is not ready for longform input
+        if not self.args.predict_with_generate or prediction_loss_only:
+            if "idxs" in inputs:
+                _ = inputs.pop("idxs")
+            return super().prediction_step(
+                model, inputs, prediction_loss_only=prediction_loss_only, ignore_keys=ignore_keys
+            )
+
         labels = inputs.pop("labels")
+        if "idxs" in inputs:
+            labels = inputs.pop("idxs")
         gen_config = self.model.generation_config
 
-        if self.args.bf16_full_eval:
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                loss, generated_tokens, _ = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys, **gen_kwargs)
+        if self.args.ctc_only_decoding:
+            with torch.autocast("cuda", dtype=torch.bfloat16) if self.args.bf16_full_eval else None:
+                loss, generated_tokens = self.model.decode_ctc(input_ids=inputs['input_ids'], stno_mask=inputs["stno_mask"], input_features=inputs["input_features"])
         else:
-            loss, generated_tokens, _ = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys,
-                                                                **gen_kwargs)
+            if self.args.bf16_full_eval:
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    loss, generated_tokens, _ = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys, **gen_kwargs)
+            else:
+                loss, generated_tokens, _ = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys,
+                                                                    **gen_kwargs)
 
         if labels is not None:
             if labels.shape[-1] < gen_config.max_length:
@@ -223,3 +259,87 @@ class CustomTrainer(Seq2SeqTrainer):
             self.log(overall_stats_dict)
             output |= overall_stats_dict
         return output
+
+    def create_optimizer(self):
+        """
+        Setup the optimizer with custom learning rate logic integrated.
+        Only adds parameters that are not already in the optimizer.
+        """
+        opt_model = self.model_wrapped if is_sagemaker_mp_enabled() else self.model
+
+        # --- NEW: Track existing parameters ---
+        existing_param_ids = set()
+        if self.optimizer is not None:
+            for group in self.optimizer.param_groups:
+                for p in group['params']:
+                    existing_param_ids.add(id(p))
+        # ---------------------------------------
+
+        # If we are doing a full reset (like in your training_step),
+        # self.optimizer will be None, so existing_param_ids will be empty.
+
+        if self.optimizer is None or len(existing_param_ids) > 0:
+            decay_parameters = self.get_decay_parameter_names(opt_model)
+            use_custom_lr = getattr(self.args, "use_custom_optimizer", True)
+            multiplier = getattr(self.args, "fddt_lr_multiplier", 1.0)
+            prefixes = getattr(self.args, "prefixes_to_preheat", [])
+
+            param_groups = {
+                "std_decay": {"params": [], "weight_decay": self.args.weight_decay, "lr": self.args.learning_rate},
+                "std_no_decay": {"params": [], "weight_decay": 0.0, "lr": self.args.learning_rate},
+                "new_decay": {"params": [], "weight_decay": self.args.weight_decay,
+                              "lr": self.args.learning_rate * multiplier},
+                "new_no_decay": {"params": [], "weight_decay": 0.0, "lr": self.args.learning_rate * multiplier},
+            }
+
+            for n, p in opt_model.named_parameters():
+                if not p.requires_grad:
+                    continue
+
+                # --- NEW: Skip if already present ---
+                if id(p) in existing_param_ids:
+                    continue
+                # ------------------------------------
+
+                is_high_lr = any(n.startswith(prefix) for prefix in prefixes) if use_custom_lr else False
+                has_decay = n in decay_parameters
+
+                if is_high_lr:
+                    group_key = "new_decay" if has_decay else "new_no_decay"
+                else:
+                    group_key = "std_decay" if has_decay else "std_no_decay"
+
+                param_groups[group_key]["params"].append(p)
+
+            optimizer_grouped_parameters = [group for group in param_groups.values() if len(group["params"]) > 0]
+
+            if self.optimizer_cls_and_kwargs is not None:
+                optimizer_cls, optimizer_kwargs = self.optimizer_cls_and_kwargs
+            else:
+                optimizer_cls, optimizer_kwargs = self.get_optimizer_cls_and_kwargs(self.args, opt_model)
+
+            # Handle specialized optimizers
+            if "params" in optimizer_kwargs:
+                optimizer_grouped_parameters = optimizer_kwargs.pop("params")
+            if "model" in optimizer_kwargs:
+                optimizer_grouped_parameters = optimizer_kwargs.pop("model")
+
+            # If self.optimizer already exists, we add_param_group instead of re-initializing
+            if self.optimizer is not None:
+                for group in optimizer_grouped_parameters:
+                    self.optimizer.add_param_group(group)
+            else:
+                self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
+
+            # BitsAndBytes specific logic
+            if "bitsandbytes" in str(optimizer_cls) and optimizer_kwargs.get("optim_bits", None) == 8:
+                import bitsandbytes
+                manager = bitsandbytes.optim.GlobalOptimManager.get_instance()
+                for module in opt_model.modules():
+                    if isinstance(module, nn.Embedding):
+                        manager.register_module_override(module, "weight", {"optim_bits": 32})
+
+        if is_sagemaker_mp_enabled() and not isinstance(self.optimizer, smp.DistributedOptimizer):
+            self.optimizer = smp.DistributedOptimizer(self.optimizer)
+
+        return self.optimizer

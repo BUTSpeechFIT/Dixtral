@@ -50,6 +50,16 @@ class GeneralTrainingArguments(Seq2SeqTrainingArguments):
         default=False, metadata={"help": "Whether to use lora in decoder."}
     )
 
+    n_last_dec_layers_to_unfreeze: Optional[int] = field(
+        default=0, metadata={"help": "Number of last layers to unfreeze."}
+    )
+    soft_prompt_custom_init: Optional[bool] = field(
+        default=False, metadata={"help": "Whether to init from existing embedding."}
+    )
+    ctc_only_decoding: Optional[bool] = field(
+        default=False, metadata={"help": "Whether to decode only from CTC branch."}
+    )
+
 
 @dataclass
 class ModelArguments:
@@ -63,6 +73,13 @@ class ModelArguments:
     pre_ctc_sub_sample: Optional[bool] = field(default=False, metadata={"help": "Whether to subsample encoder outputs."})
     whisper_model: Optional[str] = field(default="openai/whisper-small.en",
                                          metadata={"help": "Model to use for Whisper."})
+    dixtral_base_model: Optional[str] = field(default=None,
+                                      metadata={"help": "Model to use for DiXtral."})
+    dixtral_load_fddt_from: Optional[str] = field(default=None,
+                                          metadata={"help": "Model to initialize fddt params from."})
+    dixtral_replace_encoder_from: Optional[str] = field(default=None,
+                                          metadata={"help": "Model to initialize encoder params from."})
+    skip_reinit: Optional[bool] = field(default=False, metadata={"help": "Whether to skip param reinitialization."})
     reinit_encoder_from: Optional[str] = field(default=False,
                                                metadata={"help": "Path to encoder model to reinit from."})
     reinit_from: Optional[str] = field(default=False, metadata={"help": "Path to model to reinit from."})
@@ -83,14 +100,13 @@ class ModelArguments:
         "help": "Non target FDDT value for initialization"})
     use_pre_pos_fddt: Optional[bool] = field(default=True, metadata={
         "help": "Whether to use FDDT before addition of positional embeddings."})
-    prefixes_to_preheat: Optional[List[str]] = field(
-        default=None, metadata={"help": "List of prefixes to preheat."}
-    )
-    params_to_keep_frozen_keywords: Optional[List[str]] = field(default=None, metadata={
-        "help": "List of key words specifying layers to keep frozen."})
     scb_layers: Optional[int] = field(default=None, metadata={
         "help": "Number of SCB layers."
     })
+    num_soft_prompts: Optional[int] = field(default=0, metadata={
+        "help": "Number of soft prompts inserted to the prompt."
+    })
+
 
 
 
@@ -99,8 +115,6 @@ class ModelArguments:
             self.reinit_encoder_from = self.reinit_encoder_from.replace('openai/whisper-', '')
         if isinstance(self.reinit_from, str) and 'openai' in self.reinit_from:
             self.reinit_from = self.reinit_from.replace('openai/whisper-', '')
-        if self.params_to_keep_frozen_keywords is None:
-            self.params_to_keep_frozen_keywords = []
 
 
 @dataclass
@@ -132,6 +146,8 @@ class DataArguments:
 
     train_text_norm: Optional[str] = field(default=None, metadata={
         "help": "Normalisation to use for training."})
+    dev_text_norm: Optional[str] = field(default=None, metadata={
+        "help": "Normalisation to use for dev."})
     eval_text_norm: Optional[str] = field(default=None, metadata={
         "help": "Normalisation to use for evaluation."})
 
@@ -183,9 +199,10 @@ class DecodingArguments:
 @dataclass
 class CustomTrainingArguments(GeneralTrainingArguments):
     pretrain_encoder: Optional[bool] = field(default=False, metadata={"help": "Pretrain encoder."})
-    train_voxtral: Optional[bool] = field(default=False, metadata={"help": "Train LLM based model."})
-    pretrain_visual: Optional[bool] = field(default=False, metadata={"help": "Pretrain visual encoder."})
+    train_dixtral: Optional[bool] = field(default=False, metadata={"help": "Train LLM based model."})
+    train_for_qa: Optional[bool] = field(default=False, metadata={"help": "Train LLM based model."})
     decode_only: Optional[bool] = field(default=False, metadata={"help": "Only decode."})
+    save_eval_results: Optional[bool] = field(default=False, metadata={"help": "Save generation outputs to file during final evaluation."})
     use_custom_optimizer: Optional[bool] = field(default=False, metadata={"help": "Use custom optimizer."})
     use_fddt_only_n_epochs: Optional[int] = field(default=0,
                                                   metadata={"help": "Use fddts only for n epochs."})
@@ -273,7 +290,16 @@ class CustomTrainingArguments(GeneralTrainingArguments):
         default=None,
         metadata={"help": "Deprecated. Use `eval_strategy` instead"},
     )
+    prefixes_to_preheat: Optional[List[str]] = field(
+        default=None, metadata={"help": "List of prefixes to preheat."}
+    )
+    params_to_keep_frozen_keywords: Optional[List[str]] = field(default=None, metadata={
+        "help": "List of key words specifying layers to keep frozen."})
 
+    def __post_init__(self):
+        super().__post_init__()
+        if self.params_to_keep_frozen_keywords is None:
+            self.params_to_keep_frozen_keywords = []
 
 @dataclass
 class WandbConfig:

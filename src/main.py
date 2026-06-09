@@ -3,9 +3,7 @@ from hydra.core.config_store import ConfigStore
 from omegaconf import DictConfig, OmegaConf
 from transformers.utils import logging
 
-from pretrain_encoder import main as pretrain_encoder
-from train_voxtral import main as train_voxtral
-from train import main as train
+from train import main as train_dixtral
 from utils.training_args import Cfg, instantiate_arg_classes, process_config
 
 OmegaConf.register_new_resolver("eval", eval)
@@ -22,12 +20,7 @@ def main(cfg: DictConfig) -> None:
     cfg: Cfg = instantiate_arg_classes(cfg)
     process_config(cfg)
 
-    if cfg.training.pretrain_encoder:
-        pretrain_encoder(cfg)
-    elif cfg.training.train_voxtral:
-        train_voxtral(cfg)
-    else:
-        train(cfg)
+    train_dixtral(cfg)
 
 
 if __name__ == "__main__":

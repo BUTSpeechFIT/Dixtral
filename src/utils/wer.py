@@ -7,9 +7,9 @@ import numpy as np
 import pandas as pd
 from meeteval.io.seglst import SegLstSegment
 from meeteval.viz.visualize import AlignmentVisualization
-from utils.general import create_dummy_seg_list
-from utils.logging_def import get_logger
-from utils.wer_utils import create_vad_mask, find_group_splits, map_utterance_to_split, \
+from src.utils.general import create_dummy_seg_list
+from src.utils.logging_def import get_logger
+from src.utils.wer_utils import create_vad_mask, find_group_splits, map_utterance_to_split, \
     agregate_errors_across_groups, merge_streams, filter_empty_segments
 
 _LOG = get_logger('wer')
@@ -22,7 +22,7 @@ def save_wer_visualization(ref, hyp, out_dir):
     assert list(ref.keys())[0] == list(hyp.keys())[0]
 
     meeting_name = list(ref.keys())[0]
-    av = AlignmentVisualization(ref[meeting_name], hyp[meeting_name], alignment='tcp')
+    av = AlignmentVisualization(ref[meeting_name], hyp[meeting_name], alignment='cp')
     # Create standalone HTML file
     av.dump(os.path.join(out_dir, 'viz.html'))
 

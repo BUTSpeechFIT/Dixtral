@@ -1,9 +1,10 @@
+import json
 import os
 import re
 from functools import partial
 from pathlib import Path
 from typing import Dict, List, Callable
-
+import numpy as np
 import lhotse
 import pandas as pd
 import wandb
@@ -34,6 +35,30 @@ def get_metrics(labels: List[str], preds: List[str]):
     return {"cer": cer(labels, preds), **metrics}
 
 
+def compute_qa_metrics(pred, trainer, output_dir, save_results=False):
+    """Decode QA/summary generation outputs; optionally save raw predictions to JSON."""
+    metrics = {}
+    if trainer.accelerator.is_main_process:
+        tokenizer = trainer.processing_class
+        predictions = pred.predictions.copy()
+        labels = pred.label_ids.copy()
+
+        predictions[predictions == -100] = tokenizer.pad_token_id
+        labels[labels == -100] = tokenizer.pad_token_id
+
+        pred_strs = tokenizer.batch_decode(predictions, skip_special_tokens=True)
+        label_strs = tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+        if save_results:
+            os.makedirs(output_dir, exist_ok=True)
+            results = [{"prediction": p, "gt_answer": l} for p, l in zip(pred_strs, label_strs)]
+            with open(os.path.join(output_dir, "qa_results.json"), "w") as f:
+                json.dump(results, f, indent=2)
+
+    metrics = broadcast_object_list([metrics], from_process=0)
+    return metrics[0]
+
+
 def write_wandb_pred(pred_str: List[str], label_str: List[str], rows_to_log: int = 10):
     current_step = wandb.run.step
     columns = ["id", "label_str", "hyp_str"]
@@ -52,7 +77,7 @@ def write_wandb_pred(pred_str: List[str], label_str: List[str], rows_to_log: int
 
 
 def compute_metrics(output_dir: os.path, text_norm: Callable, tokenizer: PreTrainedTokenizer, pred: PredictionOutput,
-                    wandb_pred_to_save: int = 500, decode_with_timestamps=False, decoding_from_id=4) -> Dict[
+                    wandb_pred_to_save: int = 500, decode_with_timestamps=False) -> Dict[
     str, float]:
     preds = pred.predictions
     labels = pred.label_ids
@@ -65,6 +90,9 @@ def compute_metrics(output_dir: os.path, text_norm: Callable, tokenizer: PreTrai
     label_str = [text_norm(re.sub(r"\<\|\d+\.\d+\|\>", " ", label).strip()) for label in
                  tokenizer.batch_decode(labels, skip_special_tokens=True, normalize=False,
                                         decode_with_timestamps=decode_with_timestamps)]
+
+    if wandb.run is not None:
+        write_wandb_pred(pred_str, label_str, rows_to_log=wandb_pred_to_save)
 
     path = f"{output_dir}/predictions.csv"
     df = pd.DataFrame({"label": label_str, "prediction": pred_str})
@@ -146,31 +174,34 @@ def parse_string_to_objects(s):
 
 def process_session(session_preds, tokenizer, spk_id, cut: DataCut, break_to_characters=False, overflow_margin=5.0):
     session_preds[session_preds == -100] = tokenizer.pad_token_id
-    transcript = tokenizer.decode(session_preds, decode_with_timestamps=True,
-                                  skip_special_tokens=True)
-    segments = parse_string_to_objects(transcript)
-    cut_duration = cut.end - cut.start
-    for segment in segments:
-        if break_to_characters:
-            segment['text'] = LhotseLongFormDataset.add_space_between_chars(segment['text'])
-        if segment['end'] <= cut_duration + overflow_margin:
-            yield {
-                'session_id': get_cut_recording_id(cut),
-                'start_time': segment['start'] + cut.start,
-                'end_time': segment['end'] + cut.start,
-                'text': truncate_at_repeating_ngram(segment['text']),
-                'speaker_id': spk_id,
-                'wav_file_name': "in_mem" if isinstance(cut, MixedCut) else cut.recording.sources[0].source,
-            }
-        else:
-            logger.warning(f"""Detected segment out of bounds of cut. {str({
-                'session_id': get_cut_recording_id(cut),
-                'start_time': segment['start'] + cut.start,
-                'end_time': segment['end'] + cut.start,
-                'text': truncate_at_repeating_ngram(segment['text']),
-                'speaker_id': spk_id,
-                'wav_file_name': "in_mem" if isinstance(cut, MixedCut) else cut.recording.sources[0].source,
-            })}""")
+    session_preds = session_preds[None, :]
+    pattern = np.array([9909, 1058, 1262, 34])
+    pat_len = len(pattern)
+
+    # Create sliding windows: (batch, num_windows, pat_len)
+    windows = np.lib.stride_tricks.sliding_window_view(
+        session_preds, window_shape=pat_len, axis=1
+    )
+
+    # Find exact matches
+    matches = np.all(windows == pattern, axis=2)
+
+    # Mask matched subsequences
+    for i in range(pat_len):
+        session_preds[:, i:i + matches.shape[1]][matches] = tokenizer.pad_token_id
+
+    transcript = [re.sub(r"\<\|\d+\.\d+\|\>", " ", pred) for pred in
+                tokenizer.batch_decode(session_preds, skip_special_tokens=True)]
+
+    yield {
+        'session_id': get_cut_recording_id(cut),
+        'start_time': cut.start,
+        'end_time': cut.end,
+        'text': truncate_at_repeating_ngram(transcript[0]),
+        'speaker_id': spk_id,
+        'wav_file_name': "in_mem" if isinstance(cut, MixedCut) else cut.recording.sources[0].source,
+    }
+
 
 
 
