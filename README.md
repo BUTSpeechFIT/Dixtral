@@ -1,88 +1,70 @@
-# Target Speaker ASR with Whisper
-[![Paper](https://img.shields.io/badge/Paper-IEEE-blue)](https://ieeexplore.ieee.org/document/10887683)
-[![Models](https://img.shields.io/badge/Models-HuggingFace-yellow)](https://huggingface.co/collections/BUT-FIT/dicow)
+# Dixtral: Diarization-Conditioned Target-Speaker ASR, QA and Summarization
+[![Models](https://img.shields.io/badge/Models-HuggingFace-yellow)](https://huggingface.co/collections/BUT-FIT)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.11+-blue)]()
 
-This repository contains the **official implementation** of the following publications:
+**Dixtral** extends the [DiCoW](https://github.com/BUTSpeechFIT/DiCoW) target-speaker ASR system with an LLM decoder, enabling **per-speaker QA and summarization** directly from meeting audio.
 
-- **Target Speaker Whisper** — [IEEE Xplore](https://ieeexplore.ieee.org/document/10887683)  
-- **DiCoW: Diarization-Conditioned Whisper for Target Speaker Automatic Speech Recognition** — [ScienceDirect](https://www.sciencedirect.com/science/article/pii/S088523082500066X)  
-- **SE-DiCoW: Self-Enrolled Diarization-Conditioned Whisper** — *coming soon* ([TBD]())
+> **Live demo available** — see [`demo/README.md`](demo/README.md) for instructions on running the Gradio interface locally.
 
----
+The architecture combines:
+- **DiCoW encoder** — a Whisper encoder augmented with Frame-level Diarization-Dependent Transformations (FDDT) that inject Silence–Target–Non-Target–Overlap (STNO) diarization masks into every encoder layer.
+- **Voxtral decoder** — `mistralai/Voxtral-Mini-3B-2507` as the LLM backbone, fine-tuned via LoRA to answer questions about what a specific speaker said.
 
-## 🎯 Project Overview
-**DiCoW (Diarization-Conditioned Whisper)** enhances Whisper for **target-speaker ASR** by conditioning the model on **frame-level diarization probabilities**.  
-These probabilities are converted into **Silence–Target–Non-Target–Overlap (STNO)** masks and injected into each encoder layer through **Frame-level Diarization-Dependent Transformations (FDDT)**.  
-This approach enables Whisper to focus on the desired speaker without explicit speaker embeddings, making it robust to unseen speakers and diverse acoustic conditions.
-
-**SE-DiCoW (Self-Enrolled DiCoW)** resolves ambiguities in overlapping speech regions by introducing a **self-enrollment mechanism**.  
-An enrollment segment—automatically selected where the diarizer predicts the target speaker as most active—is used as a reference through **cross-attention conditioning** at encoder layers to further bias the model toward the target speaker.
-
-> **Note:** For inference-only usage without training, see our dedicated [inference repository](https://github.com/BUTSpeechFIT/DiCoW) with a streamlined browser interface.
-
-> **Note2:** For older training configurations and models, pleaser refer to the [v1 branch](https://github.com/BUTSpeechFIT/TS-ASR-Whisper/tree/v1).
----
-
-## 📦 Checkpoints
-
-| Model | Description | Link |
-|--------|--------------|------|
-| **CTC Whisper large-v3-turbo** | Pre-trained encoder model | [Download](https://nextcloud.fit.vutbr.cz/s/2AHfK2Gj2Jfa6EP) |
-| **DiCoW Models** | Fine-tuned diarization-conditioned Whisper models | [Hugging Face Collection](https://huggingface.co/collections/BUT-FIT/dicow) |
 
 ---
 
-## ⚙️ Setup and Installation
+
+## Checkpoints
+
+| Model                | Description                               | Link                                            |
+|----------------------|-------------------------------------------|-------------------------------------------------|
+| **DiCoW v3.3 large** | Diarization-conditioned Whisper (encoder) | https://huggingface.co/BUT-FIT/DiCoW_v3_3_large |
+| **Dixtral**          | Diarization-conditioned Voxtral           | https://huggingface.co/BUT-FIT/Dixtral          |
+| **Dixtral QA**       | Q/A finetunned variant                    | https://huggingface.co/BUT-FIT/Dixtral_QA       |
+
+---
+
+## Setup and Installation
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/BUTSpeechFIT/TS-ASR-Whisper
-cd TS-ASR-Whisper
-````
+git clone https://github.com/BUTSpeechFIT/Dixtral.git
+cd Dixtral
+```
 
 ### 2. Create a Python Environment
 
-Use **conda** or **venv**:
-
 **Conda**
-
 ```bash
-conda create -n ts_asr_whisper python=3.11
-conda activate ts_asr_whisper
+conda create -n dixtral python=3.11
+conda activate dixtral
 ```
 
-**Virtual Environment**
-
+**venv**
 ```bash
-python -m venv ts_asr_whisper
-source ts_asr_whisper/bin/activate
+python -m venv dixtral
+source dixtral/bin/activate
 ```
 
 ### 3. Install Dependencies
-
 ```bash
 pip install -r requirements.txt
 ```
 
-*(Optional)* To accelerate training and inference:
-
-```bash
-pip install flash-attn==2.7.2.post1
-```
-
-> ⚠️ `flash-attn` requires `torch` to be installed beforehand and is therefore **not included** in `requirements.txt`.
-
 ### 4. Configure Paths
 
-Edit [`configs/local_paths.sh`](configs/local_paths.sh) according to your environment.
-All variables are documented directly within the script.
+Edit [`configs/local_paths.sh`](configs/local_paths.sh) to set:
 
-### 5. Install Additional Tools
+| Variable | Description |
+|----------|-------------|
+| `SRC_ROOT` | Root of this repository |
+| `MANIFEST_DIR` | Directory containing Lhotse manifest files |
+| `EXPERIMENT_PATH` | Output directory for checkpoints and logs |
+| `MUSAN_ROOT` | Path to MUSAN noise corpus (optional) |
+| `HF_HOME` | Hugging Face cache directory |
 
-Ensure that `ffmpeg` and `sox` are available:
-
+### 5. System Dependencies
 ```bash
 conda install -c conda-forge ffmpeg sox
 # or
@@ -91,181 +73,218 @@ sudo apt install ffmpeg sox
 
 ---
 
-## 🎧 Data Preparation
+## Data Preparation
 
-Before training or decoding, datasets must be prepared.
-We provide a dedicated repository for this purpose:
+### ASR Data
+
+For standard target-speaker ASR, prepare Lhotse manifests using the dedicated repository:
 👉 [**mt-asr-data-prep**](https://github.com/BUTSpeechFIT/mt-asr-data-prep)
 
-Follow its instructions, then update `MANIFEST_DIR` in `configs/local_paths.sh`.
+Follow its instructions, then set `MANIFEST_DIR` in `configs/local_paths.sh`.
 
 ---
 
-## 🚀 Usage
+## Usage
 
-The codebase uses **[Hydra](https://hydra.cc/)** for configuration management.
-All configuration files are located in `./configs`, with default parameters in `configs/base.yaml`.
+The codebase uses **[Hydra](https://hydra.cc/)** for configuration. All configs are in `./configs`.
 
 ### Run Modes
 
-| Mode          | Description                                                            |
-| ------------- | ---------------------------------------------------------------------- |
-| **pre-train** | Pre-train the Whisper encoder using CTC                                |
-| **fine-tune** | Fine-tune Whisper with diarization conditioning for target-speaker ASR |
-| **decode**    | Decode using a pre-trained or fine-tuned model                         |
+| Config group | Description |
+|---|---|
+| `+train=base` | Train Dixtral encoder + decoder for target-speaker ASR |
+| `+train=qa_ft` | Fine-tune Dixtral with LoRA for QA / summarization |
+| `+train=dec_gt` | Decode with ground-truth diarization (ASR) |
+| `+train=dec_gt_qa` | Decode with a QA-fine-tuned checkpoint |
 
-### Example Commands
+Scripts are written for SLURM. Drop `sbatch` to run locally.
 
-Scripts are provided for SLURM-based systems.
-To run locally, simply omit the `sbatch` prefix.
+### Train Dixtral (Target-Speaker ASR)
 
 ```bash
-# Pre-train Whisper encoder
-sbatch ./scripts/training/submit_slurm.sh +pretrain=turbo
-
-# Fine-tune DiCoW
-sbatch ./scripts/training/submit_slurm.sh +train=dicow_v3
-
-# Decode with a trained model
-sbatch ./scripts/training/submit_slurm.sh +decode=dicow_v3_greedy
+sbatch ./scripts/submit_slurm.sh +train=base
 ```
+
+Key config knobs (`configs/train/base.yaml`):
+- `model.dixtral_base_model` — Voxtral model ID (default: `mistralai/Voxtral-Mini-3B-2507`)
+- `model.dixtral_load_fddt_from` — path to a pretrained DiCoW checkpoint (provides FDDT weights)
+- `training.use_lora` — enable LoRA on the LLM decoder
+- `data.train_cutsets` — list of Lhotse manifest paths
+
+### QA Data Preparation (NSF-QA)
+
+Dixtral QA/summarization fine-tuning requires speaker-level question-answer pairs and summaries
+annotated on top of an existing Lhotse cutset.
+We provide annotations for NOTSOFAR1 via the **NSF-QA** dataset on Hugging Face.
+
+#### Step 1 — Download NSF-QA Annotations
+
+```bash
+pip install huggingface_hub
+
+python - <<'EOF'
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id="popcornell/NSF-QA",
+    repo_type="dataset",
+    local_dir="data/nsf_qa",
+)
+EOF
+```
+
+The downloaded directory will contain:
+```
+data/nsf_qa/
+  qa_annotations/
+    <session>_qa.json          # content + paralinguistic QA per speaker
+    <session>_summaries.json   # per-speaker GT summaries
+```
+
+Each `*_qa.json` file has the structure:
+```json
+{
+  "speaker_qa": {
+    "<speaker_id>": {
+      "content_qa": [{"question": "...", "answer": "...", "type": "..."}],
+      "paralinguistic_qa": [...]
+    }
+  }
+}
+```
+
+Each `*_summaries.json` file has:
+```json
+{
+  "speaker_summaries": {
+    "<speaker_id>": ["summary text 1", "summary text 2"]
+  }
+}
+```
+
+#### Step 2 — Populate the Lhotse Cutset
+
+`utils/populate_cutset.py` merges QA/summary annotations into an existing Lhotse cutset,
+storing all prompts and ground-truth answers in `cut.custom["speakers"]`.
+
+```bash
+python utils/populate_cutset.py \
+    --cutset_path ${MANIFEST_DIR}/notsofar1/notsofar1_sdm_train_set_240825.1_train_cutset.jsonl.gz \
+    --qa_dir      data/nsf_qa/qa_annotations \
+    --summary_dir data/nsf_qa/qa_annotations \
+    --output_cutset ${MANIFEST_DIR}/notsofar1/notsofar1_sdm_train_set_240825.1_train_cutset_qa.jsonl.gz
+```
+
+Repeat for dev and eval splits:
+```bash
+for SPLIT in dev eval; do
+    python utils/populate_cutset.py \
+        --cutset_path  ${MANIFEST_DIR}/notsofar1/notsofar1_sdm_${SPLIT}_set_*.jsonl.gz \
+        --qa_dir       data/nsf_qa/qa_annotations \
+        --summary_dir  data/nsf_qa/qa_annotations \
+        --output_cutset ${MANIFEST_DIR}/notsofar1/notsofar1_sdm_${SPLIT}_set_*_qa.jsonl.gz
+done
+```
+
+The populated cutset contains one entry per original cut, each with a `custom.speakers` dict:
+```python
+cut.custom["speakers"] = {
+    "SPK1": [
+        {"prompt": "Summarize what this speaker said.", "gt_answer": "...", "qa_type": "summary", ...},
+        {"prompt": "What did the speaker propose?",     "gt_answer": "...", "qa_type": "content",  ...},
+    ],
+    ...
+}
+```
+This format is consumed directly by `TS_QA_Dataset` during training and evaluation.
+
+### Fine-tune for QA / Summarization
+
+```bash
+sbatch ./scripts/submit_slurm.sh +train=qa_ft
+```
+
+Key differences from ASR training (`configs/train/qa_ft.yaml`):
+- `training.train_for_qa: True` — switches dataset, collator, and checkpoint selection
+- `training.predict_with_generate: False` — uses loss for checkpoint selection during training
+- `training.metric_for_best_model: eval_<split>_loss`
+- `data.train_cutsets` / `dev_cutsets` / `eval_cutsets` — point to `*_qa.jsonl.gz` cutsets
+
+### Decode Only
+
+```bash
+# ASR decode with GT diarization
+sbatch ./scripts/submit_slurm.sh +train=dec_gt
+
+# QA decode with GT diarization
+sbatch ./scripts/submit_slurm.sh +train=dec_gt_qa
+```
+
 ---
 
-## 🧩 Configuration Details
+## Configuration Details
 
-Hydra configurations are modular and rely on **config groups** instead of direct YAML file paths.
-Each configuration file typically begins with:
-
+Hydra configs are modular. Each file starts with:
 ```yaml
 # @package _global_
 ```
-
-This ensures that its parameters override global defaults from `configs/base.yaml`.
-
-Configurations can also **inherit** from others using the `defaults` field, for example:
+and overrides `configs/base.yaml`. A config can inherit from another using `defaults`:
 
 ```yaml
 # @package _global_
 defaults:
-  - /train/dicow_v3
+  - /train/base
 ```
 
-This means the configuration **inherits all parameters** from `/train/dicow_v3` and can override specific values.
-This design ensures consistency and reusability across different training and evaluation setups.
+All available training/data/model parameters are documented in `src/utils/training_args.py`.
 
-### Bash Variables
+### Environment Variables (set in `configs/local_paths.sh`)
 
-Defined and described in [`configs/local_paths.sh`](configs/local_paths.sh).
-
-### YAML Config Parameters
-
-All configuration options are described in `src/utils/training_args.py`.
-
+| Variable | Used for |
+|---|---|
+| `SRC_ROOT` | Python path root |
+| `MANIFEST_DIR` | Lhotse manifest directory |
+| `EXPERIMENT_PATH` | Checkpoint and log output |
+| `MUSAN_ROOT` | MUSAN noise augmentation |
 
 ---
 
-## 🚢 Model Export
+## Model Export
 
-Trained models can be exported directly to the **Hugging Face Hub** using the provided export utility.
+Export a trained checkpoint to Hugging Face Hub:
 
-Before running the export, make sure you have:
-
-* Created a corresponding model card file named `<HUB_MODEL_NAME>.md` in `export_sources/readmes/`.
-* Optionally updated `export_sources/generation_config.json` if your model requires custom decoding parameters.
-
-Once prepared, run the following command:
+1. Create a model card at `export_sources/readmes/<HUB_MODEL_NAME>.md`
+2. Optionally update `export_sources/generation_config.json`
+3. Run:
 
 ```bash
-python ./utils/export_dicow.py \
+python ./export_dixtral.py \
   --model_path <MODEL_DIR> \
   --model_name <HUB_MODEL_NAME> \
-  --org <HUB_ORG> \
-  --base_whisper_model openai/whisper-large-v3-turbo
+  --org <HUB_ORG>
 ```
 
-Where:
+---
 
-* `<MODEL_DIR>` — path to the directory containing the trained model checkpoint.
-* `<HUB_MODEL_NAME>` — name of the target model repository on the Hugging Face Hub.
-* `<HUB_ORG>` — Hugging Face organization or user under which the model will be published.
+## License
 
-The script packages the checkpoint, configuration, and model card, then uploads them to the specified Hub repository for easy sharing and reproducibility.
+Source code is licensed under the [Apache License 2.0](LICENSE).
 
 ---
 
-## 📊 Evaluation
+## Citation
 
-For transparent and reproducible evaluation, we host a public benchmark leaderboard on Hugging Face:
-👉 [**EMMA JSALT25 Benchmark**](https://huggingface.co/spaces/BUT-FIT/EMMA_leaderboard)
-
-This step expects the evaluated model to be **available on Hugging Face Hub**.
-If you do **not** wish to export your model but still want to submit results, you can initialize it **locally** using the `reinit_from` option under the **`model.setup`** section in your YAML configuration.
-When using `reinit_from`, make sure to specify **all model initialization arguments** exactly as they were during training so the model is reconstructed correctly.
-
-To generate a submission file, use the helper script:
-
-```bash
-ORG=BUT-FIT MODEL=DiCoW_v3_2 ./scripts/create_emma_submission.sh
-```
-
-This script collects all decoding hypotheses and saves them in a JSON file formatted for leaderboard submission.
-Once created, simply upload this file to the Hugging Face space linked above to appear on the leaderboard.
-
----
-
-## 📜 License
-
-Source codes in this repository are licensed under the [Apache License 2.0](LICENSE).
-
----
-
-## 📚 Citation
-
-If you use our models or code, please cite the following works:
+If you use this code or models, please cite:
 
 ```bibtex
-@INPROCEEDINGS{10887683,
-  author={Polok, Alexander and Klement, Dominik and Wiesner, Matthew and Khudanpur, Sanjeev and Černocký, Jan and Burget, Lukáš},
-  booktitle={ICASSP 2025 - IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)},
-  title={Target Speaker {ASR} with {Whisper}},
-  year={2025},
-  pages={1-5},
-  doi={10.1109/ICASSP49660.2025.10887683}
-}
 
-@article{POLOK2026101841,
-  title = {{DiCoW}: Diarization-conditioned {Whisper} for target speaker automatic speech recognition},
-  journal = {Computer Speech & Language},
-  volume = {95},
-  pages = {101841},
-  year = {2026},
-  doi = {10.1016/j.csl.2025.101841},
-  url = {https://www.sciencedirect.com/science/article/pii/S088523082500066X},
-  author = {Alexander Polok and Dominik Klement and Martin Kocour and Jiangyu Han and Federico Landini and Bolaji Yusuf and Matthew Wiesner and Sanjeev Khudanpur and Jan Černocký and Lukáš Burget},
-  keywords = {Diarization-conditioned Whisper, Target-speaker ASR, Speaker diarization, Long-form ASR, Whisper adaptation}
-}
-
-@misc{polok2026dicowse,
-  title        = {{SE-DiCoW}: Self-Enrolled Diarization-Conditioned {Whisper}},
-  author       = {Alexander Polok and Dominik Klement and Samuele Cornell and Matthew Wiesner
-                  and Jan Černocký and Sanjeev Khudanpur and Lukáš Burget},
-  note         = {Submitted to ICASSP 2026}
-}
 ```
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
-Contributions are welcome.
-If you’d like to improve the code, add new features, or extend the training pipeline, please open an issue or submit a pull request.
+Issues and pull requests are welcome.
 
----
+## Contact
 
-## 📬 Contact
-
-For questions or collaboration, please contact:
-
-* [ipoloka@fit.vut.cz](mailto:ipoloka@fit.vut.cz)
-* [iklement@fit.vut.cz](mailto:iklement@fit.vut.cz)
-
+- [ipoloka@fit.vut.cz](mailto:ipoloka@fit.vut.cz)
