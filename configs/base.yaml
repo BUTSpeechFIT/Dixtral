@@ -6,7 +6,7 @@ wandb:
 
 model:
   dixtral_base_model: "mistralai/Voxtral-Mini-3B-2507"
-  dixtral_load_fddt_from: ${oc.env:SRC_ROOT}/dicow_large_v3
+  dixtral_load_fddt_from: "BUT-FIT/DiCoW_v3_3_large"
   num_soft_prompts: 0
   ctc_weight: 0.0
   reinit_encoder_from: null
