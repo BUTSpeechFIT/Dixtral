@@ -1,39 +1,75 @@
+import os
 import re
 
 import torch
 from peft import LoraConfig, get_peft_model
+from safetensors.torch import load_file
 from transformers import AutoProcessor
 from transformers.utils import logging
 
-from models.dicow.modeling_dicow import DiCoWForConditionalGeneration, DiCoWConfig
+from models.dicow.modeling_dicow import DiCoWConfig
 from models.dixtral.modeling_dixtral import DixtralForConditionalGeneration, DixtralConfig
 
 logging.set_verbosity_debug()
 logger = logging.get_logger("transformers")
 
-# Copy FDDT parameters
-def copy_fddt_weights(dixtral_model, dicow_model):
-    """Copy FDDT and related DiCoW weights from DiCoW encoder to Dixtral encoder."""
-    dixtral_encoder = dixtral_model.audio_tower
-    dicow_encoder = dicow_model.model.encoder
 
-    # Copy initial FDDT if exists
-    if hasattr(dixtral_encoder, 'initial_fddt') and hasattr(dicow_encoder, 'initial_fddt'):
-        dixtral_encoder.initial_fddt.load_state_dict(
-            dicow_encoder.initial_fddt.state_dict()
-        )
-        logger.info("✓ Copied initial_fddt")
+def _model_device(model) -> str:
+    try:
+        return str(next(model.parameters()).device)
+    except StopIteration:
+        return "cpu"
 
-    # Copy FDDT layers
-    if hasattr(dixtral_encoder, 'fddts') and hasattr(dicow_encoder, 'fddts'):
-        num_fddts = min(len(dixtral_encoder.fddts), len(dicow_encoder.fddts))
-        for i in range(num_fddts):
-            dixtral_encoder.fddts[i].load_state_dict(
-                dicow_encoder.fddts[i].state_dict()
-            )
-        logger.info(f"✓ Copied {num_fddts} FDDT layers")
 
-    logger.info("\n✅ All DiCoW weights copied successfully!")
+def _resolve_checkpoint_path(path: str) -> str:
+    """Return a local directory for the checkpoint, downloading from HF Hub if needed."""
+    if os.path.isdir(path):
+        return path
+    from huggingface_hub import snapshot_download
+    return snapshot_download(repo_id=path)
+
+
+def _load_checkpoint_shards(path: str, device: str = "cpu") -> dict:
+    """Load all safetensors shards from a checkpoint directory into one state dict."""
+    local_path = _resolve_checkpoint_path(path)
+    state_dict = {}
+    for fname in sorted(os.listdir(local_path)):
+        if fname.endswith(".safetensors") and "adapter" not in fname:
+            state_dict.update(load_file(os.path.join(local_path, fname), device=device))
+    return state_dict
+
+
+def _load_fddt_weights(model, checkpoint_path: str):
+    """Load only FDDT keys from a DiCoW checkpoint directly onto the model's device."""
+    device = _model_device(model)
+    state_dict = _load_checkpoint_shards(checkpoint_path, device=device)
+    # DiCoW keys: model.encoder.{initial_fddt,fddts}.*
+    # DiXtral keys: audio_tower.{initial_fddt,fddts}.*
+    fddt_map = {
+        k.replace("model.encoder.", "audio_tower."): v
+        for k, v in state_dict.items()
+        if "fddt" in k
+    }
+    missing, unexpected = model.load_state_dict(fddt_map, strict=False)
+    unexpected_fddt = [k for k in unexpected if "fddt" in k]
+    if unexpected_fddt:
+        logger.warning(f"Unexpected FDDT keys: {unexpected_fddt}")
+    logger.info(f"✓ Loaded {len(fddt_map)} FDDT tensors from {checkpoint_path} onto {device}")
+
+
+def _load_encoder_weights(model, checkpoint_path: str):
+    """Replace audio_tower weights from a DiCoW checkpoint directly onto the model's device."""
+    device = _model_device(model)
+    state_dict = _load_checkpoint_shards(checkpoint_path, device=device)
+    # Keep only encoder keys, remap model.encoder.* → audio_tower.*
+    encoder_map = {
+        k.replace("model.encoder.", "audio_tower."): v
+        for k, v in state_dict.items()
+        if k.startswith("model.encoder.")
+    }
+    result = model.load_state_dict(encoder_map, strict=False)
+    logger.info(f"✓ Replaced audio_tower from {checkpoint_path} onto {device}: {result}")
+
 
 class DixtralContainer:
     def __init__(self, params_to_keep_frozen_keywords=None, n_last_dec_layers_to_unfreeze=0,
@@ -70,20 +106,16 @@ class DixtralContainer:
             model_id,
             config=config,
             ignore_mismatched_sizes=True,  # For new DiCoW components
+            low_cpu_mem_usage=True,
+            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else None,
         )
 
 
         if not model_args.skip_reinit:
             if model_args.dixtral_load_fddt_from:
-                # Copy the weights
-                dicow = DiCoWForConditionalGeneration.from_pretrained(model_args.dixtral_load_fddt_from)
-                copy_fddt_weights(self.model, dicow)
-                del dicow
+                _load_fddt_weights(self.model, model_args.dixtral_load_fddt_from)
             if model_args.dixtral_replace_encoder_from:
-                dicow = DiCoWForConditionalGeneration.from_pretrained(model_args.dixtral_replace_encoder_from)
-                dixtral_encoder = self.model.audio_tower
-                dicow_encoder = dicow.model.encoder
-                logger.info(dixtral_encoder.load_state_dict(dicow_encoder.state_dict(), strict=False))
+                _load_encoder_weights(self.model, model_args.dixtral_replace_encoder_from)
 
         self.processor = AutoProcessor.from_pretrained(model_id)
 
