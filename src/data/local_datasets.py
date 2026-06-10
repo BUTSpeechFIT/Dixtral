@@ -127,21 +127,18 @@ class TS_ASR_DatasetSuperclass:
         return text
 
     def merge_supervisions(self, target_spk_supervision):
+        from types import SimpleNamespace
         new_merged_list = []
         for supervision in sorted(target_spk_supervision, key=lambda x: x.start):
             if len(new_merged_list) == 0:
-                supervision.end_ = supervision.end
-                supervision.text_ = supervision.text
-                new_merged_list.append(supervision)
+                new_merged_list.append(SimpleNamespace(start=supervision.start, end_=supervision.end, text_=supervision.text))
             else:
-                if round(new_merged_list[-1].end_, 2) == round(supervision.start, 2) or supervision.start - \
-                        new_merged_list[-1].end_ <= self.max_timestamp_pause:
-                    new_merged_list[-1].end_ = supervision.end
-                    new_merged_list[-1].text_ = new_merged_list[-1].text_ + " " + supervision.text
+                prev = new_merged_list[-1]
+                if round(prev.end_, 2) == round(supervision.start, 2) or supervision.start - prev.end_ <= self.max_timestamp_pause:
+                    prev.end_ = supervision.end
+                    prev.text_ = prev.text_ + " " + supervision.text
                 else:
-                    supervision.end_ = supervision.end
-                    supervision.text_ = supervision.text
-                    new_merged_list.append(supervision)
+                    new_merged_list.append(SimpleNamespace(start=supervision.start, end_=supervision.end, text_=supervision.text))
         return new_merged_list
 
     def prepare_cuts(self):
@@ -154,18 +151,23 @@ class TS_ASR_DatasetSuperclass:
         self.to_index_mapping = np.cumsum(np.concatenate(self.to_index_mapping))
 
     def get_stno_mask(self, cut: Cut, speaker_id: str):
-        speakers = list(sorted(CutSet.from_cuts([cut]).speakers))
+        speakers = self.get_cut_spks(cut)
         speakers_to_idx = {spk: idx for idx, spk in enumerate(speakers)}
-        spk_mask = cut.speakers_audio_mask(speaker_to_idx_map=speakers_to_idx)
 
-        # Pad to match features
-        pad_len = (self.feature_extractor.n_samples - spk_mask.shape[-1]) % self.feature_extractor.n_samples
-        spk_mask = np.pad(spk_mask, ((0, 0), (0, pad_len)), mode='constant')
+        # Build mask directly at model frame resolution to avoid a large sample-rate intermediate array.
+        frame_step = self.model_features_subsample_factor * self.feature_extractor.hop_length
+        n_samples = cut.num_samples
+        n_samples_padded = n_samples + (-n_samples % self.feature_extractor.n_samples)
+        n_frames = n_samples_padded // frame_step
+        sr = cut.sampling_rate
 
-        # Downsample to meet model features sampling rate
-        spk_mask = spk_mask.astype(np.float32).reshape(spk_mask.shape[0], -1,
-                                                       self.model_features_subsample_factor * self.feature_extractor.hop_length).mean(
-            axis=-1)
+        spk_mask = np.zeros((len(speakers), n_frames), dtype=np.float32)
+        for sup in cut.supervisions:
+            if sup.speaker not in speakers_to_idx:
+                continue
+            start_frame = int(sup.start * sr / frame_step)
+            end_frame = min(int(np.ceil(sup.end * sr / frame_step)), n_frames)
+            spk_mask[speakers_to_idx[sup.speaker], start_frame:end_frame] = 1.0
 
         if speaker_id == "-1":
             speaker_index = -1
@@ -320,12 +322,11 @@ class TS_ASR_DatasetSuperclass:
 
     def sample_same_speaker_cut(self, speaker_id, skip_id, greedy_sample, max_duration):
         speaker_cuts = self.per_speaker_enrollments[speaker_id]
-        filtered_cuts = speaker_cuts.filter(lambda cut: cut.recording_id != skip_id and cut.duration <= max_duration)
-        weights = np.array([cut.duration for cut in filtered_cuts])
+        filtered_cuts = [c for c in speaker_cuts if c.recording_id != skip_id and c.duration <= max_duration]
+        weights = np.array([c.duration for c in filtered_cuts])
         if greedy_sample:
-            idx = np.argmax(weights)
-            return filtered_cuts[idx]
-        sampled_idx = np.random.choice(len(filtered_cuts), p=weights / sum(weights))
+            return filtered_cuts[np.argmax(weights)]
+        sampled_idx = np.random.choice(len(filtered_cuts), p=weights / weights.sum())
         return filtered_cuts[sampled_idx]
 
     def generate_enrollment_mixture(self, original_cut, speaker_id, greedy_sample, max_enrollment_len=30.0,

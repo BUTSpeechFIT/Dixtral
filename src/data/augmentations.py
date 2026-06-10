@@ -4,8 +4,8 @@ import pathlib
 import random
 from typing import Optional, Sequence, Union
 
+import soundfile as sf
 import torch
-import torchaudio
 import torchaudio.functional as F
 
 
@@ -396,7 +396,8 @@ class RandomBackgroundNoise:
         random_noise_file = random.choice(self.noise_files_list)
 
         # Load noise file
-        noise, orig_sample_rate = torchaudio.load(str(random_noise_file))
+        data, orig_sample_rate = sf.read(str(random_noise_file), always_2d=True)
+        noise = torch.from_numpy(data.T).float()  # [channels, samples]
 
         # Convert to mono if stereo
         if noise.shape[0] > 1:
