@@ -1,9 +1,14 @@
 experiment: DEFAULT_EXPERIMENT
 exp_dir: exp
 
+wandb:
+  project: dixtral
+
 model:
-  ctc_weight: 0.3
-  whisper_model: "openai/whisper-tiny"
+  dixtral_base_model: "mistralai/Voxtral-Mini-3B-2507"
+  dixtral_load_fddt_from: ${oc.env:SRC_ROOT}/dicow_large_v3
+  num_soft_prompts: 0
+  ctc_weight: 0.0
   reinit_encoder_from: null
   reinit_from: null
   fddt_is_diagonal: true
@@ -12,32 +17,49 @@ model:
   fddt_use_target: true
   fddt_use_overlap: true
   fddt_use_non_target: true
-  apply_fddt_to_n_layers: -1  # Means all layers
+  apply_fddt_to_n_layers: -1  # -1 means all layers
   non_target_fddt_value: 0.5
   fddt_init: "suppressive"
-  prefixes_to_preheat: ['model.encoder.additional_layer', 'model.encoder.additional_self_attention_layer', 'model.encoder.lm_head', 'model.encoder.subsample_conv1', 'model.encoder.subsample_conv2', 'model.encoder.fddts', 'model.encoder.initial_fddt']
   pre_ctc_sub_sample: true
   additional_self_attention_layer: true
 
 data:
-  use_libri: false
+  use_timestamps: false
   train_cutsets:
+    - ${oc.env:MANIFEST_DIR}/notsofar1/notsofar1_sdm_train_set_240825.1_train_cutset_120s.jsonl.gz
     - ${oc.env:MANIFEST_DIR}/notsofar1/notsofar1_sdm_train_set_240825.1_train_cutset_30s.jsonl.gz
-  dev_cutsets: ${oc.env:MANIFEST_DIR}/notsofar1/notsofar1_sdm_dev_set_240825.1_dev1_cutset.jsonl.gz
-  eval_cutsets: ${oc.env:MANIFEST_DIR}/notsofar1/notsofar1_sdm_eval_set_240629.1_eval_small_with_GT_cutset.jsonl.gz
-  use_timestamps: true
-  train_text_norm: "whisper_nsf"
+    - ${oc.env:MANIFEST_DIR}/ami/ami-sdm_cutset_train_120s.jsonl.gz
+    - ${oc.env:MANIFEST_DIR}/ami/ami-sdm_cutset_train_30s.jsonl.gz
+    - ${oc.env:MANIFEST_DIR}/librimix/librimix_cutset_libri2mix_train-clean-100_noisy_30s.jsonl.gz
+  dev_cutsets:
+    - ${oc.env:MANIFEST_DIR}/notsofar1/notsofar1_sdm_dev_set_240825.1_dev1_cutset.jsonl.gz
+  eval_cutsets:
+    - ${oc.env:MANIFEST_DIR}/notsofar1/notsofar1_sdm_eval_set_240629.1_eval_small_with_GT_cutset.jsonl.gz
+  dataset_weights:
+    - 3
+    - 1
+    - 3
+    - 1
+    - 1
+  train_text_norm: "voxtral"
+  dev_text_norm: "whisper_nsf"
   eval_text_norm: "whisper_nsf"
-  dataset_weights: null
-
   global_lang_id: "en"
   provide_gt_lang: true
   load_channel_zero_only: false
+  use_libri: false
 
 aug:
-  stno_gaussian_noise_var: null
-  stno_gaussian_noise_prob: 0.0
-  do_augment: false
+  do_augment: true
+  musan_augment_prob: 0.3
+  musan_root: ${oc.env:MUSAN_ROOT}
+  spec_aug_prob: 0.3
+  stno_gaussian_noise_var: 0.2
+  stno_gaussian_noise_prob: 0.75
+  stno_max_segment_length: 50
+  stno_min_segment_length: 5
+  stno_segment_augment_prob: 0.3
+  stno_segment_change_prob: 0.1
 
 decoding:
   decoding_ctc_weight: 0.0
@@ -50,52 +72,63 @@ training:
   bf16_full_eval: true
   use_flash_attention: true
   use_lora: false
-  dataloader_num_workers: 2
-  dataloader_prefetch_factor: 1
-  dataloader_pin_memory: false
-  overall_batch_size: 64
+  train_dixtral: true
+  soft_prompt_custom_init: true
   decode_only: false
   use_custom_optimizer: true
-  use_fddt_only_n_epochs: 1
-  remove_timestamps_from_ctc: false
-  fddt_lr_multiplier: 100.0
-  use_fddt: true
-  per_device_train_batch_size: 1 #  It's set to overall_batch_size // (num_gpus * gradient_accumulation_steps)
-  per_device_eval_batch_size: 16
-  max_steps: 50000
+  use_fddt_only_n_epochs: 0
+  use_fddt_only_n_steps: 0
+  remove_timestamps_from_ctc: true
+  fddt_lr_multiplier: 10.0
+  n_last_dec_layers_to_unfreeze: 0
+  prefixes_to_preheat:
+    - additional_self_attention_layer
+    - additional_layer
+    - audio_tower.fddts
+    - audio_tower.initial_fddt
+    - soft_prompt
+  params_to_keep_frozen_keywords:
+    - language_model
+    - audio_tower.conv1
+    - audio_tower.conv2
+    - audio_tower.embed_positions
+    - ctc_lm_head
+  dataloader_num_workers: 1
+  dataloader_prefetch_factor: 1
+  dataloader_pin_memory: false
+  overall_batch_size: null
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 2
+  eval_accumulation_steps: 1
+  gradient_accumulation_steps: 4
+  gradient_checkpointing: true
+  max_steps: 25000
   num_train_epochs: 10
-  early_stopping_patience: 5
-  gradient_accumulation_steps: 1
-  learning_rate: 2e-6
-  warmup_steps: 2000
+  early_stopping_patience: -1
+  learning_rate: 6e-5
+  warmup_steps: 5000
   weight_decay: 0.0
+  lr_scheduler_type: cosine
   greater_is_better: false
   ddp_find_unused_parameters: false
-  generation_max_length: 445
+  generation_max_length: 1000
   generation_num_beams: 1
   predict_with_generate: true
   watch_grads: false
   store_src: false
-
-  eval_strategy: "epoch"
-  save_strategy: "epoch"
-  eval_steps: 1000 #  If strategy is steps, it will evaluate every eval_steps
-  save_steps: 1000 #  If strategy is steps, it will save every save_steps
-  save_total_limit: 1
-
-  metric_for_best_model: eval_notsofar1_sdm_dev_set_240825.1_dev1_cutset_tcp_wer
-  train_metrics_list: ["tcp_wer", "cp_wer"]
-  eval_metrics_list: ["tcp_wer", "cp_wer"]
-
-  do_train: true
+  eval_on_start: false
+  eval_strategy: "steps"
+  save_strategy: "steps"
+  eval_steps: 1000
+  save_steps: 1000
+  save_total_limit: null
   load_best_model_at_end: true
   logging_steps: 5
   eval_delay: 2
-
+  metric_for_best_model: eval_notsofar1_sdm_dev_set_240825.1_dev1_cutset_cp_wer
+  train_metrics_list: ["cp_wer"]
+  eval_metrics_list: ["cp_wer"]
+  save_visualizations: true
+  remove_unused_columns: false
   output_dir: ${oc.env:EXPERIMENT_PATH}/${exp_dir}/${experiment}
   run_name: ${experiment}
-  save_visualizations: false
-  remove_unused_columns: false
-
-wandb:
-  project: "dicow"

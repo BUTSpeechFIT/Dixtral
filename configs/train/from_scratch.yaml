@@ -1,0 +1,5 @@
+# @package _global_
+experiment: dixtral_rand_init
+
+training:
+  dixtral_load_fddt_from: null

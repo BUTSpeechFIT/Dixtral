@@ -1,0 +1,5 @@
+# @package _global_
+experiment: dixtral_w_lora
+
+training:
+  use_lora: True
