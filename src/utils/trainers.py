@@ -9,7 +9,7 @@ from transformers import Seq2SeqTrainer, Trainer, TrainingArguments, TrainerCall
 from transformers.trainer_utils import EvalLoopOutput
 from transformers.utils import logging, is_sagemaker_mp_enabled
 
-from utils.compute_overall_statisctics import main as compute_overall_stats
+from utils.compute_overall_statistics import main as compute_overall_stats
 
 if is_sagemaker_mp_enabled():
     import smdistributed.modelparallel.torch as smp
