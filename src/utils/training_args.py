@@ -138,7 +138,6 @@ class AugmentationArguments:
 class DataArguments:
     use_libri: Optional[bool] = field(default=False, metadata={"help": "Use LibriSpeech."})
     train_cutsets: Optional[List[str]] = field(default=None, metadata={"help": "Paths to train cutsets."})
-    enrollment_cutsets: Optional[List[str]] = field(default=None, metadata={"help": "Paths to enrollment cutsets."})
     dev_cutsets: Optional[List[str]] = field(default=None, metadata={"help": "Paths to dev cutsets."})
     eval_cutsets: Optional[List[str]] = field(default=None, metadata={"help": "Paths to eval cutsets."})
     merge_eval_cutsets: Optional[bool] = field(default=False, metadata={"help": "Whether to merge dev/eval cutsets."})
@@ -152,8 +151,6 @@ class DataArguments:
         "help": "Normalisation to use for evaluation."})
 
     dataset_weights: Optional[List[int]] = field(default=None, metadata={"help": "Path to dataset weights."})
-
-    use_enrollments: Optional[bool] = field(default=False, metadata={"help": "Use enrollments."})
 
     # language id specific arguments
     provide_gt_lang: Optional[bool] = field(default=False, metadata={"help": "Provide ground truth language."})

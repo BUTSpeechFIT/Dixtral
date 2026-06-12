@@ -92,18 +92,11 @@ class ModelTrainer:
 
     def _load_training_cutsets(self):
         """Load and prepare training cutsets."""
-        train_cutsets = load_cutsets(self.data_args.train_cutsets, self.data_args.use_enrollments)
+        train_cutsets = load_cutsets(self.data_args.train_cutsets)
         return train_cutsets
 
-    def _create_enrollment_cutset(self):
-        """Create enrollment cutset if needed."""
-        if (self.data_args.use_enrollments and
-                self.data_args.enrollment_cutsets is not None):
-            return reduce(lambda x, y: x + y,
-                          [lhotse.load_manifest(cutset) for cutset in self.data_args.enrollment_cutsets])
-        return None
 
-    def _create_train_dataset(self, train_cutsets, enrollment_cutset):
+    def _create_train_dataset(self, train_cutsets):
         """Create training dataset."""
         dataset_class = TS_QA_Dataset if self.training_args.train_for_qa else TS_ASR_Dataset
         train_dataset = dataset_class(
@@ -117,24 +110,22 @@ class ModelTrainer:
             feature_extractor=self.container.feature_extractor,
             global_lang_id=self.data_args.global_lang_id,
             load_channel_zero_only=self.data_args.load_channel_zero_only,
-            use_enrollments=self.data_args.use_enrollments,
-            enrollment_cutset=enrollment_cutset,
         )
 
         return train_dataset
 
-    def _create_eval_datasets(self, enrollment_cutset):
+    def _create_eval_datasets(self):
         """Create development and evaluation datasets."""
         if self.training_args.train_for_qa:
             dev = {"qa_dev": TS_QA_Dataset(
-                load_cutsets(self.data_args.dev_cutsets, False),
+                load_cutsets(self.data_args.dev_cutsets),
                 text_norm=get_text_norm(self.data_args.dev_text_norm),
                 feature_extractor=self.container.feature_extractor,
                 global_lang_id=self.data_args.global_lang_id,
             )}
 
             eval = {"qa_eval": TS_QA_Dataset(
-                load_cutsets(self.data_args.eval_cutsets, False),
+                load_cutsets(self.data_args.eval_cutsets),
                 text_norm=get_text_norm(self.data_args.eval_text_norm),
                 feature_extractor=self.container.feature_extractor,
                 global_lang_id=self.data_args.global_lang_id,
@@ -144,14 +135,14 @@ class ModelTrainer:
         dev_datasets = build_datasets(
             self.data_args.dev_cutsets, self.data_args,
             self.dev_text_norm, self.container, self.data_args.dev_diar_cutsets,
-            enrollment_cutset=enrollment_cutset, dataset_class=LhotseLongFormDataset,
+            dataset_class=LhotseLongFormDataset,
             use_ids_as_transcripts=self.data_args.use_diar
         )
 
         eval_datasets = build_datasets(
             self.data_args.eval_cutsets, self.data_args,
             self.eval_text_norm, self.container, self.data_args.eval_diar_cutsets,
-            enrollment_cutset=enrollment_cutset, dataset_class=LhotseLongFormDataset,
+            dataset_class=LhotseLongFormDataset,
             use_ids_as_transcripts=self.data_args.use_diar
         )
 
@@ -291,9 +282,8 @@ class ModelTrainer:
 
         # Load data
         train_cutsets = self._load_training_cutsets()
-        enrollment_cutset = self._create_enrollment_cutset()
-        train_dataset = self._create_train_dataset(train_cutsets, enrollment_cutset)
-        dev_datasets, eval_datasets = self._create_eval_datasets(enrollment_cutset)
+        train_dataset = self._create_train_dataset(train_cutsets)
+        dev_datasets, eval_datasets = self._create_eval_datasets()
 
         # Setup model
         self.model = self.container.model

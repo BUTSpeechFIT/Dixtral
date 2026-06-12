@@ -4,9 +4,11 @@ import pathlib
 import random
 from typing import Optional, Sequence, Union
 
+import numpy as np
 import soundfile as sf
 import torch
-import torchaudio.functional as F
+from math import gcd
+from scipy.signal import resample_poly
 
 
 def pad_list(xs, pad_value):
@@ -395,36 +397,35 @@ class RandomBackgroundNoise:
     def __call__(self, audio_data):
         random_noise_file = random.choice(self.noise_files_list)
 
-        # Load noise file
-        data, orig_sample_rate = sf.read(str(random_noise_file), always_2d=True)
-        noise = torch.from_numpy(data.T).float()  # [channels, samples]
+        noise, orig_sample_rate = sf.read(str(random_noise_file))  # [samples] or [samples, channels]
 
         # Convert to mono if stereo
-        if noise.shape[0] > 1:
-            noise = torch.mean(noise, dim=0, keepdim=True)
+        if noise.ndim == 2:
+            noise = noise.mean(axis=1)  # [samples]
 
         # Resample if needed
         if orig_sample_rate != self.sample_rate:
-            noise = F.resample(noise, orig_sample_rate, self.sample_rate)
+            g = gcd(self.sample_rate, orig_sample_rate)
+            noise = resample_poly(noise, self.sample_rate // g, orig_sample_rate // g)
 
         # Normalize
-        noise = noise / torch.max(torch.abs(noise))
+        noise = noise / np.max(np.abs(noise))
 
         audio_length = audio_data.shape[-1]
-        noise_length = noise.shape[-1]
+        noise_length = noise.shape[0]
 
         # Adjust noise length to match audio
         if noise_length > audio_length:
             offset = random.randint(0, noise_length - audio_length)
-            noise = noise[..., offset:offset + audio_length]
+            noise = noise[offset:offset + audio_length]
         elif noise_length < audio_length:
-            noise = torch.cat([noise, torch.zeros((noise.shape[0], audio_length - noise_length))], dim=-1)
+            noise = np.concatenate([noise, np.zeros(audio_length - noise_length)])
 
         # Calculate SNR and mix
         snr_db = random.randint(self.min_snr_db, self.max_snr_db)
         snr = 10 ** (snr_db / 10)
-        audio_power = audio_data.norm(p=2)
-        noise_power = noise.norm(p=2)
+        audio_power = np.linalg.norm(audio_data)
+        noise_power = np.linalg.norm(noise)
         noise_scale = audio_power / (snr * noise_power)
 
         return (audio_data + noise_scale * noise) / 2

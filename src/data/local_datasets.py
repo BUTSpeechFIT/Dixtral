@@ -48,8 +48,6 @@ class TS_ASR_DatasetSuperclass:
                  load_signal_sum=False,
                  musan_augment_prob=0.0,
                  musan_root=None,
-                 use_enrollments=False,
-                 enrollment_cutset=None,
                  *args,
                  **kwargs):
 
@@ -61,32 +59,7 @@ class TS_ASR_DatasetSuperclass:
 
         assert len(self.cutsets) == len(self.dataset_weights), "cutsets and dataset_weights must have the same length"
 
-        if use_enrollments:
-            parent_csets = [cutset.parent_cutset for cutset in self.cutsets if
-                            hasattr(cutset, "parent_cutset")]
-            if len(parent_csets) > 0:
-                self.parent_csets = reduce(lambda a, b: a + b, parent_csets)
-                self.parent_recording_to_id = {get_cut_recording_id(cut): idx for idx, cut in
-                                               enumerate(self.parent_csets)}
-            else:
-                self.parent_csets = None
-
         self.cset = reduce(lambda a, b: a + b, self.cutsets)
-
-        self.use_enrollments = use_enrollments
-        if self.use_enrollments:
-            self.per_speaker_enrollments = {}
-            if enrollment_cutset:
-                for cut in enrollment_cutset:
-                    speakers = self.get_cut_spks(cut)
-                    for speaker in speakers:
-                        if speaker not in self.per_speaker_enrollments:
-                            self.per_speaker_enrollments[speaker] = [cut]
-                        else:
-                            self.per_speaker_enrollments[speaker].append(cut)
-                self.enrollment_speakers = list(self.per_speaker_enrollments.keys())
-                for speaker in self.enrollment_speakers:
-                    self.per_speaker_enrollments[speaker] = CutSet.from_cuts(self.per_speaker_enrollments[speaker])
         self.max_timestamp_pause = max_timestamp_pause
         self.use_timestamps = use_timestamps
         self.text_norm = text_norm
@@ -198,41 +171,9 @@ class TS_ASR_DatasetSuperclass:
             samples = cut.load_audio().squeeze()
 
         if self.musan_augment_prob > 0.0 and torch.rand(1).item() < self.musan_augment_prob:
-            samples = self.musan_augment(torch.tensor(samples)).numpy()
+            samples = self.musan_augment(samples)
 
         return samples, None
-
-    @staticmethod
-    def sample_enrollment_window(arr, window_size=30, greedy_sample=False, skew_param=5.0):
-        arr = np.array(arr, dtype=float)
-        n = len(arr)
-
-        # Compute rolling sums (activity over each window)
-        weights = np.convolve(arr, np.ones(window_size, dtype=float), mode='valid')
-
-        if greedy_sample:
-            max_start = np.argmax(weights)
-            max_sum = weights[max_start]
-            return max_start, max_sum
-
-        max_start = n - window_size + 1
-        weights = weights[:max_start]
-
-        # Skew towards more active segments
-        weights_scaled = np.power(weights, skew_param)
-
-        # Normalize to get probabilities
-        if np.all(weights == 0):
-            raise ValueError("No speaker activity found.")
-        else:
-            probs = weights_scaled / weights_scaled.sum()
-
-        # Sample start index, ensuring it's within valid range [0, n - window_size]
-        sampled_start = np.random.choice(np.arange(0, max_start), p=probs)
-        sampled_sum = weights[sampled_start]
-
-        # Return start index, total activity
-        return sampled_start, sampled_sum
 
     @staticmethod
     def downsample_mean(arr, factor=1600):
@@ -246,39 +187,6 @@ class TS_ASR_DatasetSuperclass:
             if get_cut_recording_id(cut) in self.parent_recording_to_id:
                 return self.parent_csets[self.parent_recording_to_id[get_cut_recording_id(cut)]]
         return cut
-
-    def select_random_internal_enrollment(self, spk_id: str, cut, greedy_sample=False):
-        speakers = self.get_cut_spks(cut)
-        speakers_to_idx = {spk: idx for idx, spk in enumerate(speakers)}
-        spk_mask = cut.speakers_audio_mask(speaker_to_idx_map=speakers_to_idx)
-        spk_mask[:, (spk_mask.sum(axis=0) > 1)] = 0  # Mask overlaps
-        spk_index = speakers_to_idx[spk_id]
-        spk_activity = spk_mask[spk_index]
-        spk_activity = self.downsample_mean(spk_activity, int(cut.sampling_rate / 10))
-        best_fit_window_start, best_fit_window_act = self.sample_enrollment_window(spk_activity, window_size=30 * 10,
-                                                                                   greedy_sample=greedy_sample)
-        if best_fit_window_act == 0:  # We didn't find any target speaker only segment, everything is fully overlapped, revert to find mostly overlapped segment
-            spk_mask = cut.speakers_audio_mask(speaker_to_idx_map=speakers_to_idx)
-            spk_index = speakers_to_idx[spk_id]
-            spk_activity = spk_mask[spk_index]
-            spk_activity = self.downsample_mean(spk_activity, int(cut.sampling_rate / 10))
-            best_fit_window_start, _ = self.sample_enrollment_window(spk_activity, window_size=30 * 10,
-                                                                     greedy_sample=greedy_sample)
-        new_cut = fastcopy(cut)
-        new_cut.start = best_fit_window_start / 10
-        new_cut.duration = 30
-        supervisions_pruned = []
-        for supervision in cut.supervisions:
-            if supervision.end < new_cut.start:
-                continue
-            elif supervision.start > new_cut.end:
-                continue
-            else:
-                new_sup = fastcopy(supervision)
-                new_sup.start -= new_cut.start  # Supervision that start before or finish after our selected chunk, are by default corrected when creating STNO masks
-                supervisions_pruned.append(new_sup)
-        new_cut.supervisions = supervisions_pruned
-        return new_cut
 
     @staticmethod
     def mix_two_recordings(len_1, len_2, allowed_pause):
@@ -320,77 +228,6 @@ class TS_ASR_DatasetSuperclass:
         else:
             return 0, offsets + (target_duration - duration_to_mix)
 
-    def sample_same_speaker_cut(self, speaker_id, skip_id, greedy_sample, max_duration):
-        speaker_cuts = self.per_speaker_enrollments[speaker_id]
-        filtered_cuts = [c for c in speaker_cuts if c.recording_id != skip_id and c.duration <= max_duration]
-        weights = np.array([c.duration for c in filtered_cuts])
-        if greedy_sample:
-            return filtered_cuts[np.argmax(weights)]
-        sampled_idx = np.random.choice(len(filtered_cuts), p=weights / weights.sum())
-        return filtered_cuts[sampled_idx]
-
-    def generate_enrollment_mixture(self, original_cut, speaker_id, greedy_sample, max_enrollment_len=30.0,
-                                    randomly_shift_target_offset_p=1.0):
-        if isinstance(original_cut, MixedCut):
-            for track in original_cut.tracks:
-                if speaker_id in self.get_cut_spks(track.cut):
-                    skip_id = re.sub("_vp.*$", "", track.cut.recording_id)
-                    break
-            else:
-                raise ValueError("Did not find speaker in original cut!")
-        else:
-            skip_id = re.sub("_vp.*$", "", original_cut.recording_id)
-        same_spk_cut = self.sample_same_speaker_cut(speaker_id, skip_id, greedy_sample=greedy_sample,
-                                                    max_duration=max_enrollment_len)
-        other_speakers = random.sample(self.enrollment_speakers, 3)
-        other_cuts = [self.per_speaker_enrollments[other_speaker].sample() for
-                      other_speaker in other_speakers if other_speaker != speaker_id]
-
-        other_lens = [other_cuts[0].duration, other_cuts[1].duration]
-
-        overlap_factor = np.random.uniform(0.3, 1.0)
-        target_offset, other_offsets = self.sample_offsets(same_spk_cut.duration, other_lens, overlap_factor)
-
-        if not greedy_sample and np.random.rand() < randomly_shift_target_offset_p:
-            # Compute total mixture span so far
-            total_span = max(max(other_offsets) + max(other_lens), same_spk_cut.duration)
-            # Randomly shift the same-speaker cut somewhere within that span
-            target_offset = np.random.uniform(0, max(0, total_span - same_spk_cut.duration))
-
-        target_spk_cut_end = same_spk_cut.start + target_offset + same_spk_cut.duration
-
-        if target_spk_cut_end > max_enrollment_len:
-            # Higher overlap is needed
-            target_offset = max_enrollment_len - (same_spk_cut.start + same_spk_cut.duration)
-
-        tracks = [MixTrack(cut=same_spk_cut, offset=target_offset),
-                  MixTrack(cut=other_cuts[0], offset=other_offsets[0]),
-                  MixTrack(cut=other_cuts[1], offset=other_offsets[1])]
-
-        # Ensure that enrollment mixture is not longer than max_enrollment_len
-        final_tracks = []
-        for track in tracks:
-            if (track.cut.duration + track.offset) > max_enrollment_len:
-                current_cut = track.cut
-                track.cut = MonoCut(id=current_cut.id, duration=max(max_enrollment_len - track.offset, 0),
-                                    start=current_cut.start, channel=current_cut.channel,
-                                    supervisions=current_cut.supervisions, recording=current_cut.recording)
-            if track.cut.duration > 0.0:
-                final_tracks.append(track)
-        enrollment_mixture = MixedCut(id=f"enrollment_{skip_id}_{speaker_id}", tracks=final_tracks)
-
-        return enrollment_mixture
-
-    def get_conditioning_cut(self, cut: Union[Cut, MixedCut], speaker_id, greedy_sample):
-        if hasattr(cut, "use_external_enrollment") and cut.use_external_enrollment:
-            if speaker_id == "-1":  # we are decoding with real diarization and we didn't align current speaker without any of real ones
-                speaker_id = list(self.per_speaker_enrollments.keys())[0]  # select random speaker
-            other_cut = self.generate_enrollment_mixture(cut, speaker_id, greedy_sample=greedy_sample)
-        else:
-            parent_cut = self.get_potentionally_parent_recording(cut)
-            other_cut = self.select_random_internal_enrollment(spk_id=speaker_id, cut=parent_cut,
-                                                               greedy_sample=greedy_sample)
-        return other_cut
 
     def get_transcript(self, target_spk_supervisions, last_segment_unfinished):
         merged_supervisions = self.merge_supervisions(target_spk_supervisions)
@@ -503,9 +340,6 @@ class TS_ASR_DatasetSuperclass:
                    "transcript": transcription, "is_long_form": False}
 
         outputs["transcript"] = re.sub(r'\s+', ' ', transcription).strip()
-        if self.use_enrollments and not is_nested:
-            other_cut = self.get_conditioning_cut(cut, speaker_id, greedy_sample=True)
-            outputs["enrollment"] = self.cut_to_sample(other_cut, speaker_id, is_nested=True)
 
         if hasattr(cut, "lang"):
             outputs["language"] = cut.lang
@@ -630,46 +464,26 @@ class LhotseLongFormDataset(TS_ASR_Dataset):
             else:
                 raise ValueError("Please if your dataset does not provide lang ids, set global lang id.")
 
-        if self.use_enrollments and not is_nested:
-            other_cut = self.get_conditioning_cut(cut, speaker_id, greedy_sample=True)
-            outputs["enrollment"] = self.cut_to_sample(other_cut, speaker_id, is_nested=True)
         return outputs
 
 
-def load_cutsets(cutset_list, use_enrollments):
-    def assign_external_usage(cut):
-        cut.use_external_enrollment = True
-        return cut
-
+def load_cutsets(cutset_list):
     cutsets = []
     for cut_path in cutset_list:
-        should_use_external = False
-        if use_enrollments and "external_enrollment" in cut_path:
-            cut_path = cut_path.replace("_external_enrollment", "")
-            should_use_external = True
         cutset = lhotse.load_manifest(cut_path)
-
-        if use_enrollments:
-            if should_use_external:
-                cutset = cutset.map(assign_external_usage)
-            elif "30s" in cut_path:
-                cut_path = cut_path.replace("_30s", "")
-                parent_cutset = lhotse.load_manifest(cut_path)
-                cutset.parent_cutset = parent_cutset
-
         cutsets.append(cutset)
 
     return cutsets
 
 
 def build_datasets(cutset_paths: List[Union[str, Path]], data_args: DataArguments,
-                   text_norm, container, diar_cutset_paths=None, enrollment_cutset=None, use_ids_as_transcripts=True,
+                   text_norm, container, diar_cutset_paths=None, use_ids_as_transcripts=True,
                    dataset_class=LhotseLongFormDataset):
     logger.info('Using LhotseLongFormDataset')
     if cutset_paths is None or len(cutset_paths) == 0:
         raise ValueError("'cutset_paths' is None or empty. Please provide valid 'cutset_paths' for the dataset")
 
-    cutsets = load_cutsets(cutset_paths, data_args.use_enrollments)
+    cutsets = load_cutsets(cutset_paths)
 
     if data_args.merge_eval_cutsets:
         cutsets = [reduce(lambda a, b: a + b, cutsets)]
@@ -689,10 +503,6 @@ def build_datasets(cutset_paths: List[Union[str, Path]], data_args: DataArgument
     else:
         refs = [None for _ in cutsets]
 
-    if data_args.use_enrollments:
-        for idx, cutset_path in enumerate(cutset_paths):
-            if "libri" in cutset_path:
-                cutsets[idx].use_enrollment = True
     return {os.path.basename(path).removesuffix(".jsonl.gz"): dataset_class(cutset=cutset, references=ref,
                                                                             use_timestamps=data_args.use_timestamps,
                                                                             text_norm=text_norm,
@@ -701,8 +511,6 @@ def build_datasets(cutset_paths: List[Union[str, Path]], data_args: DataArgument
                                                                             provide_gt_lang=data_args.provide_gt_lang,
                                                                             load_channel_zero_only=data_args.load_channel_zero_only,
                                                                             break_to_characters="break_to_chars" in path,
-                                                                            use_enrollments=data_args.use_enrollments,
-                                                                            enrollment_cutset=enrollment_cutset,
                                                                             use_ids_as_transcripts=use_ids_as_transcripts
                                                                             ) for cutset, ref, path in
             zip(cutsets, refs, cutset_paths)}
