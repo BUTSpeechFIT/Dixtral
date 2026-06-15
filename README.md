@@ -219,6 +219,36 @@ sbatch ./scripts/submit_slurm.sh +train=dec_gt
 sbatch ./scripts/submit_slurm.sh +train=dec_gt_qa
 ```
 
+#### Long-form Data
+
+For optimal performance, recordings longer than ~5 minutes should be chunked before decoding. `utils/chunk_longform_cutset.py` splits a GT cutset (and optionally an aligned diarization-predicted cutset) at silence boundaries:
+
+```bash
+python utils/chunk_longform_cutset.py \
+    ${MANIFEST_DIR}/<corpus>/<corpus>_cutset_test.jsonl.gz \
+    [path/to/diar_predicted_cutset.jsonl.gz] \
+    --target-duration 300 \
+    --output-dir ${MANIFEST_DIR}/<corpus>/
+```
+
+Output filenames are derived from the input basenames with `_<duration>s` appended (e.g. `<corpus>_cutset_test_300s.jsonl.gz`).
+
+#### Multi-channel Data
+
+For optimal performance, multi-channel recordings should be reduced to a single channel before decoding. Two options:
+
+**Select a specific channel** — `utils/select_channel.py` extracts one channel from a recordings + supervisions manifest pair into a cutset:
+
+```bash
+python utils/select_channel.py \
+    --input-recset ${MANIFEST_DIR}/<corpus>/recordings.jsonl.gz \
+    --input-supset ${MANIFEST_DIR}/<corpus>/supervisions.jsonl.gz \
+    --channel 4 \
+    --output ${MANIFEST_DIR}/<corpus>/<corpus>_cuts_ch4.jsonl.gz
+```
+
+**Sum all channels** — set `data.load_signal_sum: true` in your config to average all channels to mono at data-loading time (no manifest preprocessing needed).
+
 ---
 
 ## Configuration Details

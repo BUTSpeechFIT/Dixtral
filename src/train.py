@@ -1,8 +1,6 @@
 import os
-from functools import reduce
 from typing import Dict, Any
 
-import lhotse
 import torch
 from peft.utils.save_and_load import _insert_adapter_name_into_state_dict
 from safetensors.torch import load_file
@@ -10,8 +8,8 @@ from transformers import EarlyStoppingCallback, TrainerCallback, TrainingArgumen
 from transformers.utils import logging
 
 from data.collators import DataCollator, DataCollatorQA
-from models.container import DixtralContainer
 from data.local_datasets import TS_ASR_Dataset, LhotseLongFormDataset, TS_QA_Dataset, load_cutsets, build_datasets
+from models.container import DixtralContainer, _resolve_checkpoint_path
 from txt_norm import get_text_norm
 from utils.evaluation import compute_longform_metrics, compute_qa_metrics
 from utils.general import patch_wandb_init_with_config, update_generation_config
@@ -164,6 +162,7 @@ class ModelTrainer:
                 state_dict = load_file(path)
                 logger.info(self.model.load_state_dict(state_dict, strict=False))
             else:
+                path = _resolve_checkpoint_path(path)
                 # Load all safetensors files in directory and merge
                 state_dict = {}
                 for file in os.listdir(path):
