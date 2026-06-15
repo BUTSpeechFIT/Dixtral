@@ -167,7 +167,6 @@ for SPLIT in train dev eval; do
         --split        ${SPLIT} \
         --qa_dir       data/nsf_qa/qa_annotations \
         --summary_dir  data/nsf_qa/qa_annotations/summaries \
-        --output_cutset ${MANIFEST_DIR}/notsofar1/notsofar1_sdm_${SPLIT}_set_*_cutset_qa.jsonl.gz
 done
 ```
 

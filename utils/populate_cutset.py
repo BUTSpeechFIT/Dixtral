@@ -212,14 +212,23 @@ Example:
                         help='Directory containing {split}_qa_flat.json files')
     parser.add_argument('--summary_dir',   type=str, required=True,
                         help='Directory containing {split}/<session>_summaries.json files')
-    parser.add_argument('--output_cutset', type=str, required=True,
-                        help='Path to save the populated cutset (.jsonl)')
+    parser.add_argument('--output_cutset', type=str, default=None,
+                        help='Path to save the populated cutset; defaults to <input>_qa.jsonl.gz')
 
     args = parser.parse_args()
 
     logger.info("=" * 60)
     logger.info("Cutset Population: Summarization + QA")
     logger.info("=" * 60)
+    if args.output_cutset is None:
+        input_path = args.cutset_path
+        if input_path.endswith('.jsonl.gz'):
+            args.output_cutset = input_path[:-len('.jsonl.gz')] + '_qa.jsonl.gz'
+        elif input_path.endswith('.jsonl'):
+            args.output_cutset = input_path[:-len('.jsonl')] + '_qa.jsonl'
+        else:
+            args.output_cutset = input_path + '_qa'
+
     logger.info(f"  cutset_path  : {args.cutset_path}")
     logger.info(f"  split        : {args.split}")
     logger.info(f"  qa_dir       : {args.qa_dir}")
