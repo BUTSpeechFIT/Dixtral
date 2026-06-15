@@ -213,10 +213,10 @@ Key differences from ASR training (`configs/train/qa_ft.yaml`):
 
 ```bash
 # ASR decode with GT diarization
-sbatch ./scripts/submit_slurm.sh +train=dec_gt
+sbatch ./scripts/submit_slurm.sh +decode=w_lora
 
 # QA decode with GT diarization
-sbatch ./scripts/submit_slurm.sh +train=dec_gt_qa
+sbatch ./scripts/submit_slurm.sh +decode=qa_ft
 ```
 
 #### Long-form Data
@@ -248,6 +248,14 @@ python utils/select_channel.py \
 ```
 
 **Sum all channels** — set `data.load_signal_sum: true` in your config to average all channels to mono at data-loading time (no manifest preprocessing needed).
+
+#### Diarized Cutsets
+
+To decode with predicted (rather than ground-truth) diarization, first obtain diarized cutsets using the diarization pipeline from TS-ASR-Whisper:
+👉 [`scripts/diarize.sh`](https://github.com/BUTSpeechFIT/TS-ASR-Whisper/blob/main/scripts/diarize.sh)
+
+Then wire the resulting cutsets into your decode config via `data.dev_diar_cutsets` / `data.eval_diar_cutsets`, following the pattern in:
+👉 [`configs/decode/dicow_v3_beam_joint_diar.yaml`](https://github.com/BUTSpeechFIT/TS-ASR-Whisper/blob/main/configs/decode/dicow_v3_beam_joint_diar.yaml)
 
 ---
 

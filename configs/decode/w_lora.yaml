@@ -8,11 +8,15 @@ model:
   dixtral_replace_encoder_from: null
   reinit_from: "BUT-FIT/Dixtral"
 
+training:
+  decode_only: True
+  generation_max_length: 4000
+
 data:
   eval_cutsets:
     - ${oc.env:MANIFEST_DIR}/notsofar1/notsofar1_sdm_eval_set_240629.1_eval_small_with_GT_cutset.jsonl.gz
-    - ${oc.env:MANIFEST_DIR}/ami/ami-sdm_cutset_test_5min.jsonl.gz
+    - ${oc.env:MANIFEST_DIR}/ami/ami-sdm_cutset_test_300s.jsonl.gz
     - ${oc.env:MANIFEST_DIR}/librispeechmix/librispeechmix_cutset_test-clean-1mix.jsonl.gz
     - ${oc.env:MANIFEST_DIR}/librispeechmix/librispeechmix_cutset_test-clean-2mix.jsonl.gz
     - ${oc.env:MANIFEST_DIR}/librispeechmix/librispeechmix_cutset_test-clean-3mix.jsonl.gz
-    - ${oc.env:MANIFEST_DIR}/mixer6/mixer6-mdm_eval_cuts_ch4.jsonl.gz
+    - ${oc.env:MANIFEST_DIR}/mixer6/mixer6_ch4_cutset_eval.jsonl.gz

@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - /decode/w_lora
+
+experiment: dixtral_qa_ft
+
+model:
+  reinit_from: "BUT-FIT/Dixtral_QA"
