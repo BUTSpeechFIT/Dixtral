@@ -22,6 +22,8 @@ DIARIZATION_MODEL = "BUT-FIT/diarizen-wavlm-large-s80-md"
 DIXTRAL_MODEL = os.environ.get("DIXTRAL_MODEL", "BUT-FIT/Dixtral_QA")
 # Base Voxtral id used by the processor's transcription-request template.
 DIXTRAL_BASE_MODEL = "mistralai/Voxtral-Mini-3B-2507"
+# Original Voxtral (no DiCoW) used for general audio QA conditioned on a Dixtral transcript.
+VOXTRAL_MODEL = os.environ.get("VOXTRAL_MODEL", "mistralai/Voxtral-Mini-3B-2507")
 
 # Voxtral encoder: 30s = 3000 mel frames → 1500 encoder frames at 50 fps
 FRAMES_PER_SECOND = 50
@@ -323,4 +325,57 @@ class DixtralDemoProcessor:
         finally:
             if self.device.type == "cuda":
                 torch.cuda.empty_cache()
+
+
+class VoxtralProcessor:
+    """Original Voxtral (no DiCoW encoder) for general audio QA.
+
+    Loaded lazily on first call to load(). Accepts a Dixtral transcript as
+    text context so the LLM can answer questions about the whole recording.
+    """
+
+    def __init__(self, device: torch.device):
+        self.device = device
+        self.model = None
+        self.processor = None
+
+    @property
+    def is_loaded(self) -> bool:
+        return self.model is not None
+
+    def load(self):
+        if self.is_loaded:
+            return
+        self.model = AutoModel.from_pretrained(
+            VOXTRAL_MODEL, trust_remote_code=True, torch_dtype=torch.bfloat16
+        )
+        self.processor = AutoProcessor.from_pretrained(VOXTRAL_MODEL, trust_remote_code=True)
+        self.model.to(self.device)
+        self.model.eval()
+
+    def query(self, audio: np.ndarray, transcript: str, question: str) -> str:
+        if not self.is_loaded:
+            raise RuntimeError("Call load() first")
+        b64 = _numpy_to_base64_wav(audio)
+        prompt_text = (
+            f"Transcript of the audio:\n\n{transcript}\n\n"
+            f"Question: {question}"
+        )
+        conversation = [[{"role": "user", "content": [
+            {"type": "audio", "base64": b64},
+            {"type": "text", "text": prompt_text},
+        ]}]]
+        inputs = self.processor.apply_chat_template(conversation)
+        inputs = {
+            k: v.to(self.device, dtype=torch.bfloat16)
+            if isinstance(v, torch.Tensor) and v.is_floating_point()
+            else (v.to(self.device) if isinstance(v, torch.Tensor) else v)
+            for k, v in inputs.items()
+        }
+        with torch.no_grad(), torch.autocast(self.device.type, dtype=torch.bfloat16):
+            generated = self.model.generate(**inputs, max_new_tokens=512)
+        input_len = inputs["input_ids"].shape[1]
+        return self.processor.tokenizer.decode(
+            generated[0, input_len:], skip_special_tokens=True
+        ).strip()
 

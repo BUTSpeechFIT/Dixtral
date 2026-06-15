@@ -6,10 +6,11 @@ import soundfile as sf
 import torch
 from librosa import load as libr_load
 
-from pipeline import DixtralDemoProcessor, speakers_by_arrival
+from pipeline import DixtralDemoProcessor, VoxtralProcessor, speakers_by_arrival
 
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 processor = DixtralDemoProcessor(device=device)
+voxtral_processor = VoxtralProcessor(device=device)
 
 # Palette shared by the diarization plot and the speaker selector. Each color is
 # paired with the closest circle emoji so a speaker's selector swatch matches its
@@ -400,11 +401,11 @@ def update_segment_range(audio_path, segments, row_idx, start, end, current_spea
 
 def run_model(audio_path, segments, speaker_choice, query):
     if not segments:
-        return "Please run diarization first."
+        return "Please run diarization first.", gr.skip()
     if audio_path is None:
-        return "No audio provided."
+        return "No audio provided.", gr.skip()
     if speaker_choice is None:
-        return "Please select a speaker."
+        return "Please select a speaker.", gr.skip()
 
     result = processor.process(
         audio_path=audio_path,
@@ -413,14 +414,15 @@ def run_model(audio_path, segments, speaker_choice, query):
         query=query.strip() if query else "Transcribe",
     )
     torch.cuda.empty_cache()
-    return result
+    is_transcribe = (query or "").strip().lower() in ("", "transcribe")
+    return result, result if is_transcribe else gr.skip()
 
 
 def transcribe_all(audio_path, segments):
     if not segments:
-        return "Please run diarization first."
+        return "Please run diarization first.", gr.skip()
     if audio_path is None:
-        return "No audio provided."
+        return "No audio provided.", gr.skip()
 
     all_speakers = speakers_by_arrival(segments)
 
@@ -431,7 +433,34 @@ def transcribe_all(audio_path, segments):
         query="Transcribe",
     )
     torch.cuda.empty_cache()
-    return result
+    return result, result
+
+
+def load_voxtral():
+    try:
+        voxtral_processor.load()
+        torch.cuda.empty_cache()
+        return "Loaded ✓"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def ask_voxtral(audio_path, transcript, question):
+    if not voxtral_processor.is_loaded:
+        return "Please load Voxtral first (click **Load Voxtral**)."
+    if audio_path is None:
+        return "No audio provided."
+    if not (question or "").strip():
+        return "Please enter a question."
+    if not (transcript or "").strip():
+        return "No transcript available — run **Transcribe All** first to generate context."
+    try:
+        audio, _ = libr_load(audio_path, sr=16_000, mono=True)
+        result = voxtral_processor.query(audio, transcript.strip(), question.strip())
+        torch.cuda.empty_cache()
+        return result
+    except Exception as e:
+        return f"Error: {e}"
 
 
 with gr.Blocks(theme=gr.themes.Ocean(), title="Dixtral Demo") as demo:
@@ -514,6 +543,40 @@ with gr.Blocks(theme=gr.themes.Ocean(), title="Dixtral Demo") as demo:
         min_height=200,
     )
 
+    with gr.Accordion("General Q&A with Voxtral (optional)", open=False):
+        gr.Markdown(
+            "Load the **original Voxtral** model (without DiCoW target-speaker conditioning) "
+            "to ask free-form questions about the **full recording**. Voxtral receives both "
+            "the raw audio and the Dixtral transcript as context.\n\n"
+            "**Suggested flow:** run **Transcribe All** above → the transcript auto-fills below "
+            "→ load Voxtral → ask any question.\n\n"
+            "> **Memory note:** this loads a second ~6 GB model on top of Dixtral. "
+            "Make sure you have sufficient VRAM before clicking *Load Voxtral*."
+        )
+        with gr.Row():
+            load_voxtral_btn = gr.Button("Load Voxtral", variant="secondary")
+            voxtral_status = gr.Textbox(
+                value="Not loaded", label="Status", interactive=False, scale=2
+            )
+        voxtral_transcript_box = gr.Textbox(
+            label="Transcript context — auto-filled by Transcribe All, editable",
+            placeholder="Run Transcribe All to populate this field…",
+            lines=8,
+            interactive=True,
+        )
+        voxtral_question_box = gr.Textbox(
+            value="",
+            label="Question for Voxtral",
+            placeholder="e.g. What were the main topics discussed? What was agreed upon?",
+            interactive=True,
+        )
+        ask_voxtral_btn = gr.Button("Ask Voxtral", variant="primary")
+        voxtral_output_box = gr.Markdown(
+            label="Voxtral answer",
+            container=True,
+            min_height=100,
+        )
+
     diarize_btn.click(
         fn=run_diarization,
         validator=validate_audio_file_length,
@@ -579,13 +642,25 @@ with gr.Blocks(theme=gr.themes.Ocean(), title="Dixtral Demo") as demo:
     run_btn.click(
         fn=run_model,
         inputs=[audio_input, segments_state, speaker_state, query_box],
-        outputs=[output_box],
+        outputs=[output_box, voxtral_transcript_box],
     )
 
     transcribe_all_btn.click(
         fn=transcribe_all,
         inputs=[audio_input, segments_state],
-        outputs=[output_box],
+        outputs=[output_box, voxtral_transcript_box],
+    )
+
+    load_voxtral_btn.click(
+        fn=load_voxtral,
+        inputs=[],
+        outputs=[voxtral_status],
+    )
+
+    ask_voxtral_btn.click(
+        fn=ask_voxtral,
+        inputs=[audio_input, voxtral_transcript_box, voxtral_question_box],
+        outputs=[voxtral_output_box],
     )
 
 if __name__ == "__main__":
