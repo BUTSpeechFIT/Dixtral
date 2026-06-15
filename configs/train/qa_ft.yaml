@@ -1,0 +1,32 @@
+# @package _global_
+experiment: dixtral_qa_ft
+
+model:
+  reinit_from: "BUT-FIT/Dixtral"
+
+aug:
+  do_augment: false
+
+training:
+  use_lora: True
+  train_for_qa: True
+  predict_with_generate: False
+  dataloader_prefetch_factor: 2
+  save_visualizations: False
+  gradient_accumulation_steps: 2
+  learning_rate: 4e-5
+  eval_on_start: True
+  save_steps: 500
+  eval_steps: 500
+  per_device_eval_batch_size: 4
+  metric_for_best_model: eval_qa_dev_loss
+
+data:
+  train_cutsets:
+    - ${oc.env:MANIFEST_DIR}/notsofar1/notsofar1_sdm_train_set_240825.1_train_cutset_qa.jsonl.gz
+  dev_cutsets:
+    - ${oc.env:MANIFEST_DIR}/notsofar1/notsofar1_sdm_dev_set_240825.1_dev1_cutset_qa.jsonl.gz
+  eval_cutsets:
+    - ${oc.env:MANIFEST_DIR}/notsofar1/notsofar1_sdm_eval_set_240629.1_eval_small_with_GT_cutset_qa.jsonl.gz
+  dataset_weights:
+    - 1

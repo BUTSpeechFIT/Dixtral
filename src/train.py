@@ -97,13 +97,13 @@ class ModelTrainer:
     def _create_train_dataset(self, train_cutsets):
         """Create training dataset."""
         dataset_class = TS_QA_Dataset if self.training_args.train_for_qa else TS_ASR_Dataset
+        do_augment = self.aug_args.do_augment
         train_dataset = dataset_class(
             train_cutsets,
-            do_augment=self.aug_args.do_augment,
             dataset_weights=self.data_args.dataset_weights,
             use_timestamps=self.data_args.use_timestamps,
             musan_root=self.aug_args.musan_root,
-            musan_augment_prob=self.aug_args.musan_augment_prob,
+            musan_augment_prob=self.aug_args.musan_augment_prob if do_augment else 0.0,
             text_norm=get_text_norm(self.data_args.train_text_norm),
             feature_extractor=self.container.feature_extractor,
             global_lang_id=self.data_args.global_lang_id,
@@ -172,8 +172,9 @@ class ModelTrainer:
                     prefix = "base_model.model."
                     state_dict = {prefix + k: v for k, v in state_dict.items()}
 
-                if self.training_args.use_lora:
-                    adapter_state_dict = load_file(f"{path}/adapter_model.safetensors")
+                adapter_path = f"{path}/adapter_model.safetensors"
+                if self.training_args.use_lora and os.path.exists(adapter_path):
+                    adapter_state_dict = load_file(adapter_path)
                     adapter_state_dict = _insert_adapter_name_into_state_dict(adapter_state_dict, "default", "lora_")
                     state_dict = state_dict | adapter_state_dict
                 logger.info(self.model.load_state_dict(state_dict, strict=False))
@@ -203,13 +204,25 @@ class ModelTrainer:
 
     def _create_data_collator(self):
         """Create appropriate data collator."""
-        collator_class = DataCollatorQA if self.training_args.train_for_qa else DataCollator
-        return collator_class(
+        do_augment = self.aug_args.do_augment
+        common_kwargs = dict(
             processor=self.container.processor,
             max_length=self.training_args.generation_max_length,
             model_id=self.model_args.dixtral_base_model,
             prep_for_generate=self.training_args.predict_with_generate,
             num_soft_prompts=self.model_args.num_soft_prompts,
+        )
+        if self.training_args.train_for_qa:
+            return DataCollatorQA(**common_kwargs)
+        return DataCollator(
+            **common_kwargs,
+            stno_gaussian_noise_var=self.aug_args.stno_gaussian_noise_var if do_augment else None,
+            stno_gaussian_noise_prob=self.aug_args.stno_gaussian_noise_prob if do_augment else None,
+            stno_segment_augment_prob=self.aug_args.stno_segment_augment_prob if do_augment else 0.0,
+            stno_segment_change_prob=self.aug_args.stno_segment_change_prob if do_augment else 0.0,
+            stno_min_segment_length=self.aug_args.stno_min_segment_length,
+            stno_max_segment_length=self.aug_args.stno_max_segment_length,
+            spec_aug_prob=self.aug_args.spec_aug_prob if do_augment else 0.0,
         )
 
     def _create_compute_metrics_fn(self, dev_datasets):

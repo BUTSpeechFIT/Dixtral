@@ -120,36 +120,30 @@ We provide annotations for NOTSOFAR1 via the **NSF-QA** dataset on Hugging Face.
 #### Step 1 — Download NSF-QA Annotations
 
 ```bash
-pip install huggingface_hub
-
-python - <<'EOF'
-from huggingface_hub import snapshot_download
-snapshot_download(
-    repo_id="popcornell/NSF-QA",
-    repo_type="dataset",
-    local_dir="data/nsf_qa",
-)
-EOF
+python utils/download_nsf_qa.py --local-dir data/nsf_qa
 ```
+
+This downloads only the QA (`*_flat.json`), and summary (`*_summaries.json`) files from `popcornell/NSF-QA`.
 
 The downloaded directory will contain:
 ```
 data/nsf_qa/
   qa_annotations/
-    <session>_qa.json          # content + paralinguistic QA per speaker
-    <session>_summaries.json   # per-speaker GT summaries
+    train_qa_flat.json          # flat list of {session_id, speaker, question, answer, category, type}
+    dev_qa_flat.json
+    eval_qa_flat.json
+    summaries/
+      train/<session_id>_summaries.json   # per-speaker GT summaries
+      dev/<session_id>_summaries.json
+      eval/<session_id>_summaries.json
 ```
 
-Each `*_qa.json` file has the structure:
+Each `*_qa_flat.json` is a list of records:
 ```json
-{
-  "speaker_qa": {
-    "<speaker_id>": {
-      "content_qa": [{"question": "...", "answer": "...", "type": "..."}],
-      "paralinguistic_qa": [...]
-    }
-  }
-}
+[
+  {"session_id": "MTG_30860", "speaker": "Peter", "question": "...", "answer": "...", "category": "content", "type": "entity"},
+  ...
+]
 ```
 
 Each `*_summaries.json` file has:
@@ -167,21 +161,13 @@ Each `*_summaries.json` file has:
 storing all prompts and ground-truth answers in `cut.custom["speakers"]`.
 
 ```bash
-python utils/populate_cutset.py \
-    --cutset_path ${MANIFEST_DIR}/notsofar1/notsofar1_sdm_train_set_240825.1_train_cutset.jsonl.gz \
-    --qa_dir      data/nsf_qa/qa_annotations \
-    --summary_dir data/nsf_qa/qa_annotations \
-    --output_cutset ${MANIFEST_DIR}/notsofar1/notsofar1_sdm_train_set_240825.1_train_cutset_qa.jsonl.gz
-```
-
-Repeat for dev and eval splits:
-```bash
-for SPLIT in dev eval; do
+for SPLIT in train dev eval; do
     python utils/populate_cutset.py \
-        --cutset_path  ${MANIFEST_DIR}/notsofar1/notsofar1_sdm_${SPLIT}_set_*.jsonl.gz \
+        --cutset_path  ${MANIFEST_DIR}/notsofar1/notsofar1_sdm_${SPLIT}_set_*_cutset.jsonl.gz \
+        --split        ${SPLIT} \
         --qa_dir       data/nsf_qa/qa_annotations \
-        --summary_dir  data/nsf_qa/qa_annotations \
-        --output_cutset ${MANIFEST_DIR}/notsofar1/notsofar1_sdm_${SPLIT}_set_*_qa.jsonl.gz
+        --summary_dir  data/nsf_qa/qa_annotations/summaries \
+        --output_cutset ${MANIFEST_DIR}/notsofar1/notsofar1_sdm_${SPLIT}_set_*_cutset_qa.jsonl.gz
 done
 ```
 

@@ -51,71 +51,65 @@ SUMMARIZE_PROMPT = (
 # ──────────────────────────────────────────────────────────────────────────────
 
 class SessionDataLoader:
-    """Loads QA pairs and GT summaries from separate session JSON directories."""
+    """Loads QA pairs and GT summaries from NSF-QA flat files and per-session summary JSONs.
 
-    def __init__(self, qa_dir: str, summary_dir: str):
+    Expected layout (as downloaded by utils/download_nsf_qa.py):
+        qa_dir/
+            train_qa_flat.json      # list of {session_id, speaker, question, answer, category, type}
+            dev_qa_flat.json
+            eval_qa_flat.json
+        summary_dir/
+            train/<session_id>_summaries.json
+            dev/<session_id>_summaries.json
+            eval/<session_id>_summaries.json
+    """
+
+    def __init__(self, qa_dir: str, summary_dir: str, split: str):
         self.qa_dir      = Path(qa_dir)
         self.summary_dir = Path(summary_dir)
+        self.split       = split
+        self._qa_index: Optional[Dict] = None
 
     def _session_id_to_stem(self, session_id: str) -> str:
         return session_id.replace('sdm_', '').split('_sc')[0]
 
+    def _build_qa_index(self) -> None:
+        from collections import defaultdict
+        self._qa_index = defaultdict(list)
+        flat_file = self.qa_dir / f"{self.split}_qa_flat.json"
+        with open(flat_file, 'r', encoding='utf-8') as f:
+            records = json.load(f)
+        for rec in records:
+            self._qa_index[(rec['session_id'], rec['speaker'])].append({
+                'question': rec.get('question', ''),
+                'answer':   rec.get('answer', ''),
+                'category': rec.get('category', ''),
+                'type':     rec.get('type', ''),
+            })
+        logger.info(f"Indexed {len(records)} QA records from {flat_file.name}")
+
     def load_gt_summaries(self, session_id: str, speaker_name: str) -> List[str]:
         stem = self._session_id_to_stem(session_id)
-        path = self.summary_dir / f"{stem}_summaries.json"
+        path = self.summary_dir / self.split / f"{stem}_summaries.json"
         if not path.exists():
             logger.debug(f"Summary file not found: {path}")
             return []
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            summaries = data.get('speaker_summaries', {}).get(speaker_name, [])
-            logger.debug(f"Loaded {len(summaries)} GT summaries for {speaker_name} in {session_id}")
-            return summaries
+            return data.get('speaker_summaries', {}).get(speaker_name, [])
         except Exception as e:
             logger.warning(f"Error loading GT summaries for {speaker_name} in {session_id}: {e}")
             return []
 
     def load_session_qa(self, session_id: str, speaker_name: str,
                         categories: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-        stem = self._session_id_to_stem(session_id)
-        path = self.qa_dir / f"{stem}_qa.json"
-        if not path.exists():
-            logger.debug(f"QA file not found: {path}")
-            return []
-
+        if self._qa_index is None:
+            self._build_qa_index()
         if categories is None:
             categories = ['content', 'paralinguistic', 'gender']
-
-        mapping = {
-            'content':        ('content_qa',       'content'),
-            'paralinguistic': ('paralinguistic_qa', 'paralinguistic'),
-            'tone':           ('tone_qa',           'paralinguistic'),
-            'gender':         ('gender_qa',         'paralinguistic'),
-        }
-
-        qa_pairs = []
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                session_data = json.load(f)
-
-            speaker_qa = session_data.get('speaker_qa', {}).get(speaker_name, {})
-            if not speaker_qa:
-                return []
-
-            for cat in categories:
-                key, out_cat = mapping[cat]
-                for qa in speaker_qa.get(key, []):
-                    qa_pairs.append({
-                        'question': qa.get('question', ''),
-                        'type':     qa.get('type', cat),
-                        'category': out_cat,
-                        'answer':   qa.get('answer', ''),
-                    })
-        except Exception as e:
-            logger.warning(f"Error loading QA for {speaker_name} in {session_id}: {e}")
-
-        return qa_pairs
+        stem = self._session_id_to_stem(session_id)
+        return [r for r in self._qa_index.get((stem, speaker_name), []) if r['category'] in categories]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -174,7 +168,9 @@ def populate_cutset(
                 ],
             ]
 
-        new_cut = fastcopy(cut)
+        new_cut = fastcopy(cut, supervisions=[
+            fastcopy(sup, text=None, alignment=None) for sup in cut.supervisions
+        ])
         new_cut.custom = {"speakers": speakers_data}
         new_cuts.append(new_cut)
 
@@ -210,10 +206,12 @@ Example:
     )
     parser.add_argument('--cutset_path',   type=str, required=True,
                         help='Input Lhotse cutset manifest (.jsonl)')
+    parser.add_argument('--split',         type=str, required=True, choices=['train', 'dev', 'eval'],
+                        help='Dataset split (train/dev/eval)')
     parser.add_argument('--qa_dir',        type=str, required=True,
-                        help='Directory containing *_qa.json files')
+                        help='Directory containing {split}_qa_flat.json files')
     parser.add_argument('--summary_dir',   type=str, required=True,
-                        help='Directory containing *_summaries.json files')
+                        help='Directory containing {split}/<session>_summaries.json files')
     parser.add_argument('--output_cutset', type=str, required=True,
                         help='Path to save the populated cutset (.jsonl)')
 
@@ -223,6 +221,7 @@ Example:
     logger.info("Cutset Population: Summarization + QA")
     logger.info("=" * 60)
     logger.info(f"  cutset_path  : {args.cutset_path}")
+    logger.info(f"  split        : {args.split}")
     logger.info(f"  qa_dir       : {args.qa_dir}")
     logger.info(f"  summary_dir  : {args.summary_dir}")
     logger.info(f"  output_cutset: {args.output_cutset}")
@@ -235,6 +234,7 @@ Example:
         session_loader = SessionDataLoader(
             qa_dir=args.qa_dir,
             summary_dir=args.summary_dir,
+            split=args.split,
         )
         populate_cutset(cutset, session_loader, args.output_cutset)
 
