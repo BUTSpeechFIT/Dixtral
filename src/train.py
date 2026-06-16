@@ -293,8 +293,11 @@ class ModelTrainer:
         self.eval_text_norm = get_text_norm(self.data_args.eval_text_norm)
 
         # Load data
-        train_cutsets = self._load_training_cutsets()
-        train_dataset = self._create_train_dataset(train_cutsets)
+        if not self.training_args.decode_only:
+            train_cutsets = self._load_training_cutsets()
+            train_dataset = self._create_train_dataset(train_cutsets)
+        else:
+            train_dataset = None
         dev_datasets, eval_datasets = self._create_eval_datasets()
 
         # Setup model

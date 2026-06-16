@@ -125,6 +125,7 @@ def patch_wandb_init_with_config(cfg, store_src):
                 temp_path = f.name
                 tmp_dir = os.path.dirname(temp_path)
             wandb.save(temp_path, base_path=tmp_dir)
+            os.unlink(temp_path)
             if store_src:
                 wandb.run.log_code(os.path.dirname(os.path.dirname(__file__)))
         except Exception as e:

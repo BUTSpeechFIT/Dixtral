@@ -1,18 +1,18 @@
-import lhotse
-import numpy as np
 import os
-import random
 import re
-import torch
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from functools import reduce
-from lhotse import CutSet
-from lhotse.cut import Cut, MixedCut, MixTrack, MonoCut
-from lhotse.utils import fastcopy
 from pathlib import Path
+from typing import Dict, List, Union
+
+import lhotse
+import numpy as np
+import torch
+from lhotse import CutSet
+from lhotse.cut import Cut
 from torch.utils.data import Dataset
 from transformers.utils import logging
-from typing import Dict, List, Union
 
 from data.augmentations import RandomBackgroundNoise
 from utils.general import round_nearest, get_cut_recording_id
@@ -104,14 +104,17 @@ class TS_ASR_DatasetSuperclass:
         new_merged_list = []
         for supervision in sorted(target_spk_supervision, key=lambda x: x.start):
             if len(new_merged_list) == 0:
-                new_merged_list.append(SimpleNamespace(start=supervision.start, end_=supervision.end, text_=supervision.text))
+                new_merged_list.append(
+                    SimpleNamespace(start=supervision.start, end_=supervision.end, text_=supervision.text))
             else:
                 prev = new_merged_list[-1]
-                if round(prev.end_, 2) == round(supervision.start, 2) or supervision.start - prev.end_ <= self.max_timestamp_pause:
+                if round(prev.end_, 2) == round(supervision.start,
+                                                2) or supervision.start - prev.end_ <= self.max_timestamp_pause:
                     prev.end_ = supervision.end
                     prev.text_ = prev.text_ + " " + supervision.text
                 else:
-                    new_merged_list.append(SimpleNamespace(start=supervision.start, end_=supervision.end, text_=supervision.text))
+                    new_merged_list.append(
+                        SimpleNamespace(start=supervision.start, end_=supervision.end, text_=supervision.text))
         return new_merged_list
 
     def prepare_cuts(self):
@@ -228,7 +231,6 @@ class TS_ASR_DatasetSuperclass:
         else:
             return 0, offsets + (target_duration - duration_to_mix)
 
-
     def get_transcript(self, target_spk_supervisions, last_segment_unfinished):
         merged_supervisions = self.merge_supervisions(target_spk_supervisions)
         # Build parts with raw text first, track ST boundary flags
@@ -326,7 +328,6 @@ class TS_ASR_DatasetSuperclass:
             target_spk_supervisions = filter(lambda x: x.speaker == speaker_id, cut.supervisions)
             transcription = self.get_transcript(target_spk_supervisions, last_segment_unfinished)
             transcripts.append(transcription)
-        open('train.txt', 'w').write("\n".join(transcripts))
 
     def cut_to_sample(self, cut: Cut, speaker_id: str, idx: int = -1, is_nested: bool = False):
         stno_mask = self.get_stno_mask(cut, speaker_id)
@@ -516,8 +517,21 @@ def build_datasets(cutset_paths: List[Union[str, Path]], data_args: DataArgument
             zip(cutsets, refs, cutset_paths)}
 
 
-
 class TS_QA_Dataset(TS_ASR_Dataset):
+    def __init__(self, *args, audio_cache_size=8, **kwargs):
+        self._audio_cache = OrderedDict()
+        self._audio_cache_size = audio_cache_size
+        super().__init__(*args, **kwargs)
+
+    def _get_cached_features(self, cut):
+        if self.musan_augment_prob > 0:
+            return self.get_features(cut)
+        if cut.id not in self._audio_cache:
+            if len(self._audio_cache) >= self._audio_cache_size:
+                self._audio_cache.popitem(last=False)
+            self._audio_cache[cut.id] = self.get_features(cut)
+        return self._audio_cache[cut.id]
+
     @staticmethod
     def get_number_of_questions_from_monocut(cut):
         number_of_questions = 0
@@ -534,10 +548,9 @@ class TS_QA_Dataset(TS_ASR_Dataset):
             self.to_index_mapping.append(qa_per_cut)
         self.to_index_mapping = np.cumsum(np.concatenate(self.to_index_mapping))
 
-
     def cut_to_sample(self, cut: Cut, speaker_id: str, qa: Dict[str, str], idx: int = -1, is_nested: bool = False):
         stno_mask = self.get_stno_mask(cut, speaker_id)
-        features, att_mask = self.get_features(cut)
+        features, att_mask = self._get_cached_features(cut)
 
         outputs = {"input_features": features, "stno_mask": torch.tensor(stno_mask), "attention_mask": att_mask,
                    "is_long_form": True}

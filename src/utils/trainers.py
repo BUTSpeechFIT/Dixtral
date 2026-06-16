@@ -223,7 +223,10 @@ class CustomTrainer(Seq2SeqTrainer):
         gen_config = self.model.generation_config
 
         if self.args.ctc_only_decoding:
-            with torch.autocast("cuda", dtype=torch.bfloat16) if self.args.bf16_full_eval else None:
+            if self.args.bf16_full_eval:
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    loss, generated_tokens = self.model.decode_ctc(input_ids=inputs['input_ids'], stno_mask=inputs["stno_mask"], input_features=inputs["input_features"])
+            else:
                 loss, generated_tokens = self.model.decode_ctc(input_ids=inputs['input_ids'], stno_mask=inputs["stno_mask"], input_features=inputs["input_features"])
         else:
             if self.args.bf16_full_eval:

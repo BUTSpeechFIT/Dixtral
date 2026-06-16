@@ -321,15 +321,6 @@ def get_notinitable_props(cls):
     return set([f.name for f in fields(cls) if not f.init])
 
 
-def recursively_process_envs(cfg: dict):
-    for key in cfg:
-        if isinstance(cfg[key], dict):
-            recursively_process_envs(cfg[key])
-        elif isinstance(cfg[key], str):
-            var_name = re.search('${oc.env:XXX}', r'\${oc\.env:(.+?)}').group(1)
-            cfg[key] = os.getenv(var_name)
-
-
 def instantiate_arg_classes(cfg_dic: DictConfig) -> Cfg:
     """
     OmegaConf by default returns a DictConfig object. It uses the Cfg object to perform type/field checking only.

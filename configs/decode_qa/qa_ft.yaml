@@ -1,8 +1,8 @@
 # @package _global_
 defaults:
-  - /train/qa_ft
+  - /train_qa/dixtral_ft
 
-experiment: dixtral_qa_ft
+experiment: dixtral_qa_decoding
 
 model:
   reinit_from: BUT-FIT/Dixtral_QA
