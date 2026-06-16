@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - /train/qa_ft
+
+experiment: dixtral_qa_ft
+
+model:
+  reinit_from: BUT-FIT/Dixtral_QA
+
+training:
+  decode_only: True
+  save_eval_results: True
