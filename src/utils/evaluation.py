@@ -43,15 +43,30 @@ def compute_qa_metrics(pred, trainer, output_dir, save_results=False):
         predictions = pred.predictions.copy()
         labels = pred.label_ids.copy()
 
-        predictions[predictions == -100] = tokenizer.pad_token_id
-        labels[labels == -100] = tokenizer.pad_token_id
+        pad_id = tokenizer.pad_token_id
+        prompt_strs, answer_strs, label_strs = [], [], []
+        for preds_row, labels_row in zip(predictions, labels):
+            # Leading -100s in labels correspond to masked prompt tokens
+            prompt_len = int(np.argmax(labels_row != -100))
 
-        pred_strs = tokenizer.batch_decode(predictions, skip_special_tokens=True)
-        label_strs = tokenizer.batch_decode(labels, skip_special_tokens=True)
+            prompt_toks = preds_row[:prompt_len].copy()
+            prompt_toks[prompt_toks == -100] = pad_id
+            prompt_strs.append(tokenizer.decode(prompt_toks, skip_special_tokens=True))
+
+            answer_toks = preds_row[prompt_len:].copy()
+            answer_toks[answer_toks == -100] = pad_id
+            answer_strs.append(tokenizer.decode(answer_toks, skip_special_tokens=True))
+
+            gt_toks = labels_row.copy()
+            gt_toks[gt_toks == -100] = pad_id
+            label_strs.append(tokenizer.decode(gt_toks, skip_special_tokens=True))
 
         if save_results:
             os.makedirs(output_dir, exist_ok=True)
-            results = [{"prediction": p, "gt_answer": l} for p, l in zip(pred_strs, label_strs)]
+            results = [
+                {"prompt": p, "answer": a, "gt_answer": l}
+                for p, a, l in zip(prompt_strs, answer_strs, label_strs)
+            ]
             with open(os.path.join(output_dir, "qa_results.json"), "w") as f:
                 json.dump(results, f, indent=2)
 
