@@ -299,7 +299,15 @@ Source code is licensed under the [Apache License 2.0](LICENSE).
 If you use this code or models, please cite:
 
 ```bibtex
-
+@inproceedings{polok26b_interspeech,
+  title     = {{Grounding Spoken LLMs in Multi-Speaker Audio via Diarization Conditioning}},
+  author    = {Alexander Polok and Samuele Cornell and Sathvik Udupa and Honza Černocký and Shinji Watanabe and Lukáš Burget},
+  year      = {2026},
+  booktitle = {{Interspeech 2026}},
+  pages     = {300--305},
+  doi       = {10.21437/Interspeech.2026-445},
+  issn      = {2958-1796},
+}
 ```
 
 ---
